@@ -56,18 +56,19 @@ Coordinates in Sweet Home 3D are defined in centimeters (`cm`), where $1.0\text{
   - `--project <path>`: Specifies target `.sh3d` or `.json` project file.
 
 ### 2.2 Command Groups
-1. `project`: `new`, `open`, `save`, `info`, `validate`
-2. `wall`: `add`, `list`, `remove`
-3. `room`: `add`, `list`, `remove`, `area`
+1. `project`: `new`, `open`, `save`, `info`, `validate`, `takeoff`
+2. `wall`: `add`, `add-loop`, `list`, `remove` (supports straight & curved arc walls)
+3. `room`: `add` (with `--with-walls` boundary generation), `list`, `remove`, `area`
 4. `opening`: `add`, `list`, `remove` (doors & windows)
 5. `furniture`: `add`, `list`, `remove`, `catalog`
-6. `level`: `add`, `list`, `set-current`
-7. `export`: `sh3d`, `svg`, `dxf`, `json`
-8. `session`: `status`, `undo`, `redo`, `history`
+6. `dimension`: `add`, `list`, `remove` (architectural dimension lines)
+7. `level`: `add`, `list`, `set-current` (multi-story floor levels)
+8. `export`: `sh3d`, `svg`, `dxf`, `html`, `json` (supports `--level` filtering)
+9. `session`: `status`, `undo`, `redo`, `history`
 
 ---
 
-## 3. Implementation Details (Phase 3)
+## 3. Implementation Details (Phase 3 & Refinement)
 
 ### 3.1 Concurrency & Session File Locking
 Session persistence uses `_locked_save_json` to prevent race conditions when multiple agent tasks or terminal panes access `.sh3d_session.json` simultaneously.
@@ -77,7 +78,32 @@ Room area is computed deterministically using the Shoelace formula (Gauss's area
 $$A = \frac{1}{2} \left| \sum_{i=0}^{n-1} (x_i y_{i+1} - x_{i+1} y_i) \right|$$
 Converted from $\text{cm}^2$ to $\text{m}^2$ ($A_{\text{m}^2} = A_{\text{cm}^2} / 10,000$).
 
-### 3.3 Vector Export Engine
+### 3.3 Single-Command Agent Ergonomics
+To prevent agent coordinate hallucination and redundant multi-step tool calls, the harness provides single-command macros:
+- `wall add-loop`: Builds a complete closed perimeter or chain of connected walls from a sequence of points in one call.
+- `room add --with-walls`: Creates the room polygon, computes area, and automatically instantiates surrounding structural walls in a single transaction.
+
+### 3.4 Curved Wall Arc Math
+Walls support circular curvature via `arc_extent` (angle in degrees).
+Arc length is computed deterministically:
+$$L = r \cdot \theta_{\text{rad}}, \quad r = \frac{c}{2 \sin(\theta_{\text{rad}} / 2)}$$
+where $c$ is chord distance between endpoints.
+
+### 3.5 Architectural Takeoff & BOQ Engine
+`project takeoff` computes instant material takeoff metrics:
+- Gross wall surface area ($m^2$)
+- Deductions for door and window openings ($m^2$)
+- Net masonry wall area ($m^2$)
+- Interior paint coverage ($m^2 = 2 \times \text{Net Area}$)
+- Net skirting/baseboard run ($m = \text{Perimeter} - \sum \text{Door Widths}$)
+- Total finished floor and plasterboard ceiling area ($m^2$)
+- Complete furniture equipment inventory count.
+
+### 3.6 Multi-Format & Interactive Export Engine
+- **SVG Export**: Layered vector drawing with room colors, dimension ticks, wall thicknesses, and door swing arcs.
+- **Interactive HTML Viewer**: Zero-dependency standalone HTML5 application featuring interactive pan/zoom canvas, real-time layer visibility toggles (rooms, walls, doors/windows, furniture, dimensions), and live BOQ metrics sidebar.
+- **DXF Export**: Generates AutoCAD R12/2000 `.dxf` with dedicated CAD layers (`WALLS`, `ROOMS`, `DOORS`, `FURNITURE`, `DIMENSIONS`).
+- **`.sh3d` Export**: Generates standard compressed ZIP archives containing `Home.xml` ready for Sweet Home 3D GUI.
 - **SVG Export**: Emits publication-quality, layered architectural drawings:
   - `<g id="site_boundary">`
   - `<g id="rooms">` with pastel fills, room labels, and square meter callouts.

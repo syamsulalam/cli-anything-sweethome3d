@@ -39,8 +39,17 @@ cli-anything-sweethome3d --json project validate
 
 # Export artifacts
 cli-anything-sweethome3d --json export svg -o floorplan.svg
+cli-anything-sweethome3d --json export html -o viewer.html
 cli-anything-sweethome3d --json export dxf -o floorplan.dxf
 cli-anything-sweethome3d --json export sh3d -o house.sh3d
+
+# Single-Command Ergonomics (Loops & Room Walls)
+cli-anything-sweethome3d --json wall add-loop --points "0,0;800,0;800,600;0,600" --prefix ext_
+cli-anything-sweethome3d --json room add --id r2 --name "Kitchen" --points "0,0;400,0;400,300;0,300" --with-walls
+
+# Dimension Lines & Takeoff Bill of Quantities (BOQ / RAB)
+cli-anything-sweethome3d --json dimension add --id dim1 --x1 0 --y1 0 --x2 800 --y2 0 --offset 40
+cli-anything-sweethome3d --json project takeoff
 ```
 
 ---

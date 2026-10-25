@@ -7,15 +7,17 @@ from cli_anything.sweethome3d.core import (
     HomeModel,
     SessionManager,
     FURNITURE_CATALOG,
+    DimensionLine,
     export_svg,
     export_dxf,
     export_json,
+    export_html,
 )
 from cli_anything.sweethome3d.utils.repl_skin import ReplSkin
 from cli_anything.sweethome3d.utils.sweethome3d_backend import find_sweethome3d, launch_gui, get_install_instructions
 
 session_mgr = SessionManager()
-skin = ReplSkin("sweethome3d", version="1.0.0")
+skin = ReplSkin("sweethome3d", version="1.1.0")
 
 def output_result(ctx, data, human_formatter=None):
     """Outputs data either as JSON or human-readable format based on context flag."""
@@ -24,7 +26,7 @@ def output_result(ctx, data, human_formatter=None):
         click.echo(json.dumps({"status": "success", "data": data}, indent=2))
     elif human_formatter:
         human_formatter(data)
-    elif isinstance(data, dict) or isinstance(data, list):
+    elif isinstance(data, (dict, list)):
         click.echo(json.dumps(data, indent=2))
     else:
         skin.success(str(data))
@@ -55,7 +57,7 @@ def cli(ctx, json_mode):
 # ==============================================================================
 @cli.group()
 def project():
-    """Project management commands (new, open, save, info, validate)."""
+    """Project management commands (new, open, save, info, validate, takeoff)."""
     pass
 
 @project.command(name="new")
@@ -99,18 +101,21 @@ def project_info(ctx):
         "name": m.name,
         "version": m.version,
         "active_file": session_mgr.active_file,
+        "current_level": session_mgr.current_level_id,
         "summary": val["summary"],
         "levels": [lvl.to_dict() for lvl in m.levels],
     }
     def formatter(d):
         skin.status("Project Name", d["name"])
         skin.status("Active File", d["active_file"] or "(Unsaved In-Memory)")
+        skin.status("Active Level", d["current_level"])
         skin.status("Total Area", f"{d['summary']['total_area_m2']:.2f} m²")
         skin.status("Total Wall Run", f"{d['summary']['total_wall_length_m']:.1f} m")
         skin.status("Walls Count", d['summary']['walls_count'])
         skin.status("Rooms Count", d['summary']['rooms_count'])
         skin.status("Openings Count", d['summary']['openings_count'])
         skin.status("Furniture Count", d['summary']['furniture_count'])
+        skin.status("Dimensions Count", d['summary']['dimensions_count'])
     output_result(ctx, data, human_formatter=formatter)
 
 @project.command(name="validate")
@@ -129,6 +134,25 @@ def project_validate(ctx):
             skin.warning(f"Warning: {warn}")
     output_result(ctx, val, human_formatter=formatter)
 
+@project.command(name="takeoff")
+@click.pass_context
+def project_takeoff(ctx):
+    """Generate architectural Bill of Quantities (BOQ / RAB) takeoff."""
+    takeoff_data = session_mgr.model.takeoff()
+    def formatter(d):
+        skin.status("Project", d["project_name"])
+        skin.status("Floor Area", f"{d['floor_and_ceiling']['total_floor_area_m2']:.2f} m²")
+        skin.status("Ceiling Plaster", f"{d['floor_and_ceiling']['ceiling_plasterboard_m2']:.2f} m²")
+        skin.status("Baseboard Skirting", f"{d['floor_and_ceiling']['skirting_baseboard_linear_m']:.1f} m")
+        skin.status("Gross Wall Area", f"{d['masonry_and_walls']['gross_wall_surface_m2']:.1f} m²")
+        skin.status("Openings Deduct", f"{d['masonry_and_walls']['openings_deduction_m2']:.1f} m²")
+        skin.status("Net Masonry Wall", f"{d['masonry_and_walls']['net_masonry_wall_m2']:.1f} m²")
+        skin.status("Wall Paint (2x)", f"{d['masonry_and_walls']['interior_wall_paint_m2']:.1f} m²")
+        skin.status("Doors Count", d["openings_schedule"]["doors_count"])
+        skin.status("Windows Count", d["openings_schedule"]["windows_count"])
+        skin.status("Furniture Total", d["furniture_schedule"]["total_items"])
+    output_result(ctx, takeoff_data, human_formatter=formatter)
+
 # ==============================================================================
 # 2. Wall Commands
 # ==============================================================================
@@ -145,25 +169,60 @@ def wall():
 @click.option("--y2", required=True, type=float, help="End Y coordinate in cm.")
 @click.option("--thickness", default=15.0, type=float, help="Wall thickness in cm (default: 15.0).")
 @click.option("--height", default=None, type=float, help="Wall height in cm.")
-@click.option("--level", "level_id", default="level1", help="Target level ID.")
+@click.option("--level", "level_id", default=None, help="Target level ID (defaults to active session level).")
+@click.option("--arc-extent", default=0.0, type=float, help="Curved wall arc angle in degrees (0 = straight).")
 @click.pass_context
-def wall_add(ctx, wall_id, x1, y1, x2, y2, thickness, height, level_id):
-    """Add a new wall segment."""
+def wall_add(ctx, wall_id, x1, y1, x2, y2, thickness, height, level_id, arc_extent):
+    """Add a new wall segment (straight or curved)."""
+    target_lvl = level_id or session_mgr.current_level_id
     session_mgr.push_state()
-    w = session_mgr.model.add_wall(wall_id, x1, y1, x2, y2, thickness, height, level_id)
+    w = session_mgr.model.add_wall(wall_id, x1, y1, x2, y2, thickness, height, target_lvl, arc_extent)
     session_mgr.save_session()
     output_result(ctx, w.to_dict())
 
-@wall.command(name="list")
+@wall.command(name="add-loop")
+@click.option("--prefix", "--id-prefix", "id_prefix", default="w_", help="Prefix for generated wall IDs (e.g. 'w_').")
+@click.option("--points", required=True, help="Point sequence: 'x1,y1;x2,y2;x3,y3;...' in cm.")
+@click.option("--closed/--open", default=True, help="Whether to close the loop from last to first point.")
+@click.option("--thickness", default=15.0, type=float, help="Wall thickness in cm.")
+@click.option("--height", default=None, type=float, help="Wall height in cm.")
+@click.option("--level", "level_id", default=None, help="Target level ID.")
 @click.pass_context
-def wall_list(ctx):
+def wall_add_loop(ctx, id_prefix, points, closed, thickness, height, level_id):
+    """Create a continuous loop or chain of connected wall segments in one command."""
+    target_lvl = level_id or session_mgr.current_level_id
+    pts = []
+    try:
+        for pair in points.split(";"):
+            if pair.strip():
+                x, y = pair.strip().split(",")
+                pts.append((float(x), float(y)))
+    except Exception as e:
+        output_error(ctx, f"Invalid points format: {e}")
+
+    session_mgr.push_state()
+    try:
+        created = session_mgr.model.add_wall_loop(pts, prefix=id_prefix, closed=closed, thickness=thickness, height=height, level_id=target_lvl)
+        session_mgr.save_session()
+        data = [w.to_dict() for w in created]
+        output_result(ctx, {"created_count": len(created), "created_walls": data, "walls": data})
+    except Exception as e:
+        output_error(ctx, str(e))
+
+@wall.command(name="list")
+@click.option("--level", "level_id", default=None, help="Filter by level ID.")
+@click.pass_context
+def wall_list(ctx, level_id):
     """List all walls in the project."""
-    walls = [w.to_dict() for w in session_mgr.model.walls.values()]
+    walls = [
+        w.to_dict() for w in session_mgr.model.walls.values()
+        if not level_id or w.level_id == level_id
+    ]
     def formatter(data):
-        headers = ["ID", "Start (X,Y)", "End (X,Y)", "Len (m)", "Thick (cm)", "Level"]
+        headers = ["ID", "Start (X,Y)", "End (X,Y)", "Len (m)", "Thick (cm)", "Arc(°)", "Level"]
         rows = [
             [d["id"], f"{d['x_start']:.0f},{d['y_start']:.0f}", f"{d['x_end']:.0f},{d['y_end']:.0f}",
-             d["length_m"], d["thickness"], d["level_id"]]
+             d["length_m"], d["thickness"], d["arc_extent"], d["level_id"]]
             for d in data
         ]
         skin.table(headers, rows)
@@ -195,10 +254,13 @@ def room():
 @click.option("--name", required=True, help="Name of the room (e.g. 'Master Bedroom').")
 @click.option("--points", required=True, help="Polygon points format: 'x1,y1;x2,y2;x3,y3;...' in cm.")
 @click.option("--color", default="#EAEAEA", help="Floor fill hex color.")
-@click.option("--level", "level_id", default="level1", help="Target level ID.")
+@click.option("--level", "level_id", default=None, help="Target level ID.")
+@click.option("--with-walls", is_flag=True, help="Automatically generate perimeter boundary walls.")
+@click.option("--wall-thickness", default=15.0, type=float, help="Wall thickness if --with-walls is set.")
 @click.pass_context
-def room_add(ctx, room_id, name, points, color, level_id):
-    """Add an enclosed architectural room polygon."""
+def room_add(ctx, room_id, name, points, color, level_id, with_walls, wall_thickness):
+    """Add an enclosed architectural room polygon, optionally generating boundary walls."""
+    target_lvl = level_id or session_mgr.current_level_id
     pts = []
     try:
         if points.startswith("["):
@@ -212,20 +274,27 @@ def room_add(ctx, room_id, name, points, color, level_id):
         output_error(ctx, f"Invalid points format: {e}")
 
     session_mgr.push_state()
-    r = session_mgr.model.add_room(room_id, name, pts, level_id=level_id, floor_color=color)
+    r = session_mgr.model.add_room(room_id, name, pts, level_id=target_lvl, floor_color=color,
+                                   with_walls=with_walls, wall_thickness=wall_thickness)
     session_mgr.save_session()
-    output_result(ctx, r.to_dict())
+    res = r.to_dict()
+    res["with_walls"] = with_walls
+    output_result(ctx, res)
 
 @room.command(name="list")
+@click.option("--level", "level_id", default=None, help="Filter by level ID.")
 @click.pass_context
-def room_list(ctx):
+def room_list(ctx, level_id):
     """List all rooms and calculated floor areas."""
-    rooms = [r.to_dict() for r in session_mgr.model.rooms.values()]
+    rooms = [
+        r.to_dict() for r in session_mgr.model.rooms.values()
+        if not level_id or r.level_id == level_id
+    ]
     def formatter(data):
-        headers = ["ID", "Name", "Area (m²)", "Vertices", "Color", "Centroid (cm)"]
+        headers = ["ID", "Name", "Area (m²)", "Vertices", "Color", "Centroid (cm)", "Level"]
         rows = [
             [d["id"], d["name"], d["area_m2"], len(d["points"]), d["floor_color"],
-             f"{d['centroid'][0]:.0f},{d['centroid'][1]:.0f}"]
+             f"{d['centroid'][0]:.0f},{d['centroid'][1]:.0f}", d["level_id"]]
             for d in data
         ]
         skin.table(headers, rows)
@@ -336,14 +405,16 @@ def furniture_catalog(ctx):
 @click.option("--catalog", "catalog_id", default="custom", help="Catalog code (e.g. bed_king, sofa_3seat).")
 @click.option("--x", required=True, type=float, help="Center X coordinate in cm.")
 @click.option("--y", required=True, type=float, help="Center Y coordinate in cm.")
+@click.option("--elevation", default=0.0, type=float, help="Elevation above floor in cm.")
 @click.option("--width", default=None, type=float, help="Width in cm.")
 @click.option("--depth", default=None, type=float, help="Depth in cm.")
 @click.option("--height", default=None, type=float, help="Height in cm.")
 @click.option("--angle", default=0.0, type=float, help="Rotation angle in degrees [0, 360).")
-@click.option("--level", "level_id", default="level1", help="Target level ID.")
+@click.option("--level", "level_id", default=None, help="Target level ID.")
 @click.pass_context
-def furniture_add(ctx, furniture_id, name, catalog_id, x, y, width, depth, height, angle, level_id):
+def furniture_add(ctx, furniture_id, name, catalog_id, x, y, elevation, width, depth, height, angle, level_id):
     """Add a piece of furniture."""
+    target_lvl = level_id or session_mgr.current_level_id
     cat_entry = FURNITURE_CATALOG.get(catalog_id, {})
     item_name = name or cat_entry.get("name", "Custom Furniture")
     w = width or cat_entry.get("width", 100.0)
@@ -351,20 +422,24 @@ def furniture_add(ctx, furniture_id, name, catalog_id, x, y, width, depth, heigh
     h = height or cat_entry.get("height", 80.0)
 
     session_mgr.push_state()
-    f = session_mgr.model.add_furniture(furniture_id, item_name, catalog_id, x, y, 0.0, w, d, h, angle, level_id)
+    f = session_mgr.model.add_furniture(furniture_id, item_name, catalog_id, x, y, elevation, w, d, h, angle, target_lvl)
     session_mgr.save_session()
     output_result(ctx, f.to_dict())
 
 @furniture.command(name="list")
+@click.option("--level", "level_id", default=None, help="Filter by level ID.")
 @click.pass_context
-def furniture_list(ctx):
+def furniture_list(ctx, level_id):
     """List all furniture in the project."""
-    items = [f.to_dict() for f in session_mgr.model.furniture.values()]
+    items = [
+        f.to_dict() for f in session_mgr.model.furniture.values()
+        if not level_id or f.level_id == level_id
+    ]
     def formatter(data):
-        headers = ["ID", "Name", "Catalog ID", "Pos (X,Y)", "Size (WxD)", "Angle"]
+        headers = ["ID", "Name", "Catalog ID", "Pos (X,Y)", "Elev (cm)", "Size (WxD)", "Angle", "Level"]
         rows = [
             [d["id"], d["name"], d["catalog_id"], f"{d['x_cm']:.0f},{d['y_cm']:.0f}",
-             f"{d['width_cm']:.0f}x{d['depth_cm']:.0f}", f"{d['angle_deg']:.0f}°"]
+             d["elevation_cm"], f"{d['width_cm']:.0f}x{d['depth_cm']:.0f}", f"{d['angle_deg']:.0f}°", d["level_id"]]
             for d in data
         ]
         skin.table(headers, rows)
@@ -384,34 +459,156 @@ def furniture_remove(ctx, furniture_id):
         output_error(ctx, f"Furniture '{furniture_id}' not found.")
 
 # ==============================================================================
-# 6. Export Commands
+# 6. Dimension Line Commands
+# ==============================================================================
+@cli.group()
+def dimension():
+    """Architectural dimension line measurement commands."""
+    pass
+
+@dimension.command(name="add")
+@click.option("--id", "dimension_id", required=True, help="Unique dimension ID.")
+@click.option("--x1", required=True, type=float, help="Start X coordinate in cm.")
+@click.option("--y1", required=True, type=float, help="Start Y coordinate in cm.")
+@click.option("--x2", required=True, type=float, help="End X coordinate in cm.")
+@click.option("--y2", required=True, type=float, help="End Y coordinate in cm.")
+@click.option("--offset", default=30.0, type=float, help="Offset distance from measured points in cm.")
+@click.option("--level", "level_id", default=None, help="Target level ID.")
+@click.pass_context
+def dimension_add(ctx, dimension_id, x1, y1, x2, y2, offset, level_id):
+    """Add an architectural dimension callout line."""
+    target_lvl = level_id or session_mgr.current_level_id
+    session_mgr.push_state()
+    dim = session_mgr.model.add_dimension(dimension_id, x1, y1, x2, y2, offset, target_lvl)
+    session_mgr.save_session()
+    output_result(ctx, dim.to_dict())
+
+@dimension.command(name="list")
+@click.option("--level", "level_id", default=None, help="Filter by level ID.")
+@click.pass_context
+def dimension_list(ctx, level_id):
+    """List all dimension lines and measured lengths."""
+    dims = [
+        d.to_dict() for d in session_mgr.model.dimensions.values()
+        if not level_id or d.level_id == level_id
+    ]
+    def formatter(data):
+        headers = ["ID", "Start (X,Y)", "End (X,Y)", "Distance (m)", "Offset (cm)", "Level"]
+        rows = [
+            [d["id"], f"{d['x_start']:.0f},{d['y_start']:.0f}", f"{d['x_end']:.0f},{d['y_end']:.0f}",
+             d["distance_m"], d["offset_cm"], d["level_id"]]
+            for d in data
+        ]
+        skin.table(headers, rows)
+    output_result(ctx, dims, human_formatter=formatter)
+
+@dimension.command(name="remove")
+@click.argument("dimension_id")
+@click.pass_context
+def dimension_remove(ctx, dimension_id):
+    """Remove a dimension line by ID."""
+    session_mgr.push_state()
+    removed = session_mgr.model.remove_dimension(dimension_id)
+    session_mgr.save_session()
+    if removed:
+        output_result(ctx, {"removed": dimension_id})
+    else:
+        output_error(ctx, f"Dimension '{dimension_id}' not found.")
+
+# ==============================================================================
+# 7. Level Commands
+# ==============================================================================
+@cli.group()
+def level():
+    """Multi-story floor level management commands."""
+    pass
+
+@level.command(name="add")
+@click.option("--id", "level_id", required=True, help="Unique level ID (e.g. 'level2').")
+@click.option("--name", required=True, help="Level name (e.g. 'Second Floor').")
+@click.option("--elevation", default=0.0, type=float, help="Elevation in cm.")
+@click.option("--height", default=280.0, type=float, help="Ceiling height in cm.")
+@click.pass_context
+def level_add(ctx, level_id, name, elevation, height):
+    """Add a new storey level."""
+    session_mgr.push_state()
+    lvl = session_mgr.model.add_level(level_id, name, elevation, height)
+    session_mgr.save_session()
+    output_result(ctx, lvl.to_dict())
+
+@level.command(name="set-current")
+@click.argument("level_id", required=False)
+@click.option("--id", "opt_level_id", default=None, help="Level ID to set as active.")
+@click.pass_context
+def level_set_current(ctx, level_id, opt_level_id):
+    """Set the active default level for new entities."""
+    target_id = opt_level_id or level_id
+    if not target_id:
+        output_error(ctx, "Level ID must be provided as an argument or via --id.")
+    try:
+        active = session_mgr.set_current_level(target_id)
+        output_result(ctx, {"current_level": active, "current_level_id": active})
+    except ValueError as e:
+        output_error(ctx, str(e))
+
+@level.command(name="list")
+@click.pass_context
+def level_list(ctx):
+    """List all levels."""
+    levels = [lvl.to_dict() for lvl in session_mgr.model.levels]
+    def formatter(data):
+        headers = ["ID", "Name", "Elevation (cm)", "Height (cm)", "Active"]
+        rows = [
+            [d["id"], d["name"], d["elevation_cm"], d["height_cm"],
+             "★ Yes" if d["id"] == session_mgr.current_level_id else "No"]
+            for d in data
+        ]
+        skin.table(headers, rows)
+    output_result(ctx, levels, human_formatter=formatter)
+
+# ==============================================================================
+# 8. Export Commands
 # ==============================================================================
 @cli.group()
 def export():
-    """Export floorplan drawings to SVG, DXF, SH3D, or JSON."""
+    """Export floorplan drawings to SVG, DXF, HTML, SH3D, or JSON."""
     pass
 
 @export.command(name="svg")
 @click.option("-o", "--output", required=True, help="Destination .svg path.")
+@click.option("--level", "level_id", default=None, help="Filter by level ID.")
 @click.pass_context
-def export_svg_cmd(ctx, output):
+def export_svg_cmd(ctx, output, level_id):
     """Export layered architectural vector SVG."""
     try:
-        out_path = export_svg(session_mgr.model, output)
-        output_result(ctx, {"exported": out_path, "format": "svg"})
+        out_path = export_svg(session_mgr.model, output, level_id=level_id)
+        output_result(ctx, {"exported": out_path, "format": "svg", "level": level_id or "all"})
     except Exception as e:
         output_error(ctx, f"Export SVG failed: {e}")
 
 @export.command(name="dxf")
 @click.option("-o", "--output", required=True, help="Destination .dxf path.")
+@click.option("--level", "level_id", default=None, help="Filter by level ID.")
 @click.pass_context
-def export_dxf_cmd(ctx, output):
+def export_dxf_cmd(ctx, output, level_id):
     """Export AutoCAD-compatible DXF R12 file."""
     try:
-        out_path = export_dxf(session_mgr.model, output)
-        output_result(ctx, {"exported": out_path, "format": "dxf"})
+        out_path = export_dxf(session_mgr.model, output, level_id=level_id)
+        output_result(ctx, {"exported": out_path, "format": "dxf", "level": level_id or "all"})
     except Exception as e:
         output_error(ctx, f"Export DXF failed: {e}")
+
+@export.command(name="html")
+@click.option("-o", "--output", required=True, help="Destination .html path.")
+@click.option("--level", "level_id", default=None, help="Filter by level ID.")
+@click.pass_context
+def export_html_cmd(ctx, output, level_id):
+    """Export interactive self-contained HTML floor plan viewer."""
+    try:
+        out_path = export_html(session_mgr.model, output, level_id=level_id)
+        output_result(ctx, {"exported": out_path, "format": "html", "level": level_id or "all"})
+    except Exception as e:
+        output_error(ctx, f"Export HTML failed: {e}")
 
 @export.command(name="sh3d")
 @click.option("-o", "--output", required=True, help="Destination .sh3d path.")
@@ -426,17 +623,18 @@ def export_sh3d_cmd(ctx, output):
 
 @export.command(name="json")
 @click.option("-o", "--output", required=True, help="Destination .json path.")
+@click.option("--level", "level_id", default=None, help="Filter by level ID.")
 @click.pass_context
-def export_json_cmd(ctx, output):
+def export_json_cmd(ctx, output, level_id):
     """Export structured JSON floor plan model."""
     try:
-        out_path = export_json(session_mgr.model, output)
-        output_result(ctx, {"exported": out_path, "format": "json"})
+        out_path = export_json(session_mgr.model, output, level_id=level_id)
+        output_result(ctx, {"exported": out_path, "format": "json", "level": level_id or "all"})
     except Exception as e:
         output_error(ctx, f"Export JSON failed: {e}")
 
 # ==============================================================================
-# 7. Session Commands
+# 9. Session Commands
 # ==============================================================================
 @cli.group()
 def session():
@@ -449,13 +647,16 @@ def session_status(ctx):
     """Show session status, active file, and undo/redo counts."""
     data = {
         "active_file": session_mgr.active_file,
+        "current_level": session_mgr.current_level_id,
         "undo_steps": len(session_mgr.undo_stack),
         "redo_steps": len(session_mgr.redo_stack),
         "walls_count": len(session_mgr.model.walls),
         "rooms_count": len(session_mgr.model.rooms),
+        "dimensions_count": len(session_mgr.model.dimensions),
     }
     def formatter(d):
         skin.status("Active File", d["active_file"] or "(In-Memory)")
+        skin.status("Current Level", d["current_level"])
         skin.status("Undo Steps", d["undo_steps"])
         skin.status("Redo Steps", d["redo_steps"])
     output_result(ctx, data, human_formatter=formatter)
@@ -481,7 +682,7 @@ def session_redo(ctx):
         output_error(ctx, msg)
 
 # ==============================================================================
-# 8. GUI Desktop App Launcher
+# 10. GUI Desktop App Launcher
 # ==============================================================================
 @cli.command(name="gui")
 @click.option("--file", "project_file", default=None, help="Optional .sh3d file to open.")
@@ -496,7 +697,7 @@ def gui_cmd(ctx, project_file):
         output_error(ctx, str(e))
 
 # ==============================================================================
-# 9. Interactive REPL Mode
+# 11. Interactive REPL Mode
 # ==============================================================================
 def run_repl():
     """Starts the interactive prompt-driven REPL."""
@@ -504,19 +705,19 @@ def run_repl():
     while True:
         try:
             prompt_name = session_mgr.model.name or "sweethome3d"
-            cmd_line = input(f"{skin.CYAN}[{prompt_name}]{skin.RESET} > ").strip()
+            lvl_name = session_mgr.current_level_id
+            cmd_line = input(f"{skin.CYAN}[{prompt_name} ({lvl_name})]{skin.RESET} > ").strip()
             if not cmd_line:
                 continue
             if cmd_line.lower() in ["exit", "quit", "q"]:
                 skin.print_goodbye()
                 break
             if cmd_line.lower() == "help":
-                print("\nAvailable command groups: project, wall, room, opening, furniture, export, session, gui")
-                print("Examples: 'project info', 'wall list', 'room list', 'export svg -o out.svg'")
+                print("\nAvailable command groups: project, wall, room, opening, furniture, dimension, level, export, session, gui")
+                print("Examples: 'project info', 'wall add-loop', 'room add --with-walls', 'export html -o plan.html'")
                 print("Type 'exit' to quit.\n")
                 continue
 
-            # Split command line respecting quotes
             import shlex
             args = shlex.split(cmd_line)
             try:

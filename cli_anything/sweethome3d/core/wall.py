@@ -1,9 +1,13 @@
 import math
 
 class Wall:
-    """Represents an architectural wall in Sweet Home 3D (coordinates in centimeters)."""
+    """Represents an architectural wall in Sweet Home 3D (coordinates in centimeters).
+    
+    Supports straight walls and curved/arc walls via `arc_extent` (in degrees).
+    """
 
-    def __init__(self, wall_id, x_start, y_start, x_end, y_end, thickness=15.0, height=280.0, level_id="level1"):
+    def __init__(self, wall_id, x_start, y_start, x_end, y_end, thickness=15.0, height=280.0,
+                 level_id="level1", arc_extent=0.0):
         self.id = str(wall_id)
         self.x_start = float(x_start)
         self.y_start = float(y_start)
@@ -12,11 +16,42 @@ class Wall:
         self.thickness = float(thickness)
         self.height = float(height)
         self.level_id = str(level_id)
+        self.arc_extent = float(arc_extent)  # degrees; 0.0 = straight wall
+
+    @property
+    def x1(self):
+        return self.x_start
+
+    @property
+    def y1(self):
+        return self.y_start
+
+    @property
+    def x2(self):
+        return self.x_end
+
+    @property
+    def y2(self):
+        return self.y_end
+
+    @property
+    def chord_length(self):
+        """Direct line distance between wall endpoints in centimeters."""
+        return math.hypot(self.x_end - self.x_start, self.y_end - self.y_start)
 
     @property
     def length(self):
-        """Length of wall in centimeters."""
-        return math.hypot(self.x_end - self.x_start, self.y_end - self.y_start)
+        """Actual length of wall along its path in centimeters."""
+        c = self.chord_length
+        if abs(self.arc_extent) < 1e-4:
+            return c
+        # Arc length: L = r * theta_rad, where chord c = 2 * r * sin(theta_rad / 2)
+        theta_rad = abs(math.radians(self.arc_extent))
+        sin_half = math.sin(theta_rad / 2.0)
+        if abs(sin_half) < 1e-6:
+            return c
+        r = c / (2.0 * sin_half)
+        return r * theta_rad
 
     @property
     def length_m(self):
@@ -24,13 +59,23 @@ class Wall:
         return round(self.length / 100.0, 2)
 
     @property
+    def arc_length(self):
+        """Alias for actual wall length along path (arc length for curved walls)."""
+        return self.length
+
+    @property
+    def arc_length_m(self):
+        """Alias for actual wall length in meters."""
+        return self.length_m
+
+    @property
     def angle_rad(self):
-        """Angle in radians relative to horizontal X axis."""
+        """Chord angle in radians relative to horizontal X axis."""
         return math.atan2(self.y_end - self.y_start, self.x_end - self.x_start)
 
     @property
     def angle_deg(self):
-        """Angle in degrees [0, 360)."""
+        """Chord angle in degrees [0, 360)."""
         deg = math.degrees(self.angle_rad) % 360.0
         return round(deg, 1)
 
@@ -54,6 +99,7 @@ class Wall:
             "thickness": self.thickness,
             "height": self.height,
             "level_id": self.level_id,
+            "arc_extent": self.arc_extent,
             "length_m": self.length_m,
             "angle_deg": self.angle_deg,
         }
@@ -69,4 +115,5 @@ class Wall:
             thickness=d.get("thickness", 15.0),
             height=d.get("height", 280.0),
             level_id=d.get("level_id", "level1"),
+            arc_extent=d.get("arc_extent", 0.0),
         )

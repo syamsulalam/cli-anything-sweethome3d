@@ -94,10 +94,12 @@ Furniture Count     : 1
 | `project` | `save` | Save active project to `.sh3d` or `.json`. |
 | `project` | `info` | Show project metadata, total area ($m^2$), and element counts. |
 | `project` | `validate`| Check wall bounds, opening lengths, and room polygon closures. |
-| `wall` | `add` | Add a wall segment with start/end (X,Y), thickness, and height. |
+| `project` | `takeoff` | Generate architectural takeoff / Bill of Quantities (BOQ/RAB) metrics. |
+| `wall` | `add` | Add a wall segment (straight or curved via `--arc-extent`). |
+| `wall` | `add-loop`| Rapidly build a perimeter loop or chain of connected walls from points. |
 | `wall` | `list` | Print tabular list of all walls with lengths in meters. |
 | `wall` | `remove` | Delete a wall by ID (cascades to attached openings). |
-| `room` | `add` | Define an architectural room polygon and calculate area via Shoelace formula. |
+| `room` | `add` | Define room polygon (with `--with-walls` to auto-generate walls). |
 | `room` | `list` | Print tabular list of rooms, areas ($m^2$), colors, and centroids. |
 | `room` | `area` | Query the exact calculated area for a specific room. |
 | `opening` | `add` | Place a door or window opening on a host wall. |
@@ -105,7 +107,14 @@ Furniture Count     : 1
 | `furniture`| `catalog` | List standard furniture presets (beds, sofas, tables, fixtures). |
 | `furniture`| `add` | Place a furniture item with coordinates and rotation angle. |
 | `furniture`| `list` | List placed furniture items. |
+| `dimension`| `add` | Add an architectural dimension line between two points with offset. |
+| `dimension`| `list` | List all dimension lines and measured lengths. |
+| `dimension`| `remove` | Delete a dimension line by ID. |
+| `level` | `add` | Add a multi-story floor level with elevation and ceiling height. |
+| `level` | `list` | List all floor levels with active indicator. |
+| `level` | `set-current`| Set the active floor level for new entities. |
 | `export` | `svg` | Export publication-grade vector SVG with layers and dimension callouts. |
+| `export` | `html` | Export standalone interactive HTML5 floor plan viewer with pan/zoom. |
 | `export` | `dxf` | Export AutoCAD-compatible DXF R12 text file. |
 | `export` | `sh3d` | Export native Sweet Home 3D compressed ZIP archive containing `Home.xml`. |
 | `export` | `json` | Export structured JSON representation. |

@@ -2,11 +2,13 @@ import os
 import zipfile
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
+from collections import Counter
 
 from cli_anything.sweethome3d.core.wall import Wall
 from cli_anything.sweethome3d.core.room import Room
 from cli_anything.sweethome3d.core.opening import Opening
 from cli_anything.sweethome3d.core.furniture import Furniture
+from cli_anything.sweethome3d.core.dimension import DimensionLine
 
 class Level:
     def __init__(self, level_id="level1", name="Ground Floor", elevation_cm=0.0, height_cm=280.0):
@@ -44,6 +46,7 @@ class HomeModel:
         self.rooms = {}
         self.openings = {}
         self.furniture = {}
+        self.dimensions = {}
 
     # Level methods
     def add_level(self, level_id, name, elevation_cm=0.0, height_cm=280.0):
@@ -58,15 +61,68 @@ class HomeModel:
         return None
 
     # Wall methods
-    def add_wall(self, wall_id, x_start, y_start, x_end, y_end, thickness=15.0, height=None, level_id="level1"):
+    def add_wall(self, wall_id, x_start, y_start, x_end, y_end, thickness=15.0, height=None,
+                 level_id="level1", arc_extent=0.0):
         h = height if height is not None else self.wall_height
-        w = Wall(wall_id, x_start, y_start, x_end, y_end, thickness, h, level_id)
+        w = Wall(wall_id, x_start, y_start, x_end, y_end, thickness, h, level_id, arc_extent)
         self.walls[w.id] = w
         return w
 
+    def add_wall_loop(self, *args, **kwargs):
+        """Constructs a continuous sequence of connected wall segments from a list of (x,y) points.
+        
+        Supports calling as:
+          add_wall_loop(points, prefix="w_")
+          add_wall_loop(id_prefix, points)
+        """
+        id_prefix = "w_"
+        points = []
+
+        if len(args) == 1:
+            if isinstance(args[0], (list, tuple)):
+                points = args[0]
+            elif isinstance(args[0], str):
+                id_prefix = args[0]
+        elif len(args) >= 2:
+            if isinstance(args[0], str) and isinstance(args[1], (list, tuple)):
+                id_prefix = args[0]
+                points = args[1]
+            elif isinstance(args[0], (list, tuple)):
+                points = args[0]
+                if isinstance(args[1], str):
+                    id_prefix = args[1]
+
+        if "points" in kwargs:
+            points = kwargs["points"]
+        if "prefix" in kwargs:
+            id_prefix = kwargs["prefix"]
+        elif "id_prefix" in kwargs:
+            id_prefix = kwargs["id_prefix"]
+
+        closed = kwargs.get("closed", True)
+        thickness = kwargs.get("thickness", 15.0)
+        height = kwargs.get("height", None)
+        level_id = kwargs.get("level_id", "level1")
+        arc_extent = kwargs.get("arc_extent", 0.0)
+
+        pts = [(float(p[0]), float(p[1])) for p in points]
+        if len(pts) < 2:
+            raise ValueError("Wall loop requires at least 2 points.")
+        
+        sep = "" if id_prefix.endswith("_") else "_"
+        created = []
+        n = len(pts)
+        num_segments = n if closed else n - 1
+        for i in range(num_segments):
+            p1 = pts[i]
+            p2 = pts[(i + 1) % n]
+            wid = f"{id_prefix}{sep}{i + 1}"
+            w = self.add_wall(wid, p1[0], p1[1], p2[0], p2[1], thickness, height, level_id, arc_extent)
+            created.append(w)
+        return created
+
     def remove_wall(self, wall_id):
         if wall_id in self.walls:
-            # Also remove openings hosted on this wall
             to_remove = [oid for oid, op in self.openings.items() if op.wall_id == wall_id]
             for oid in to_remove:
                 del self.openings[oid]
@@ -75,9 +131,14 @@ class HomeModel:
         return False
 
     # Room methods
-    def add_room(self, room_id, name, points, level_id="level1", floor_color="#EAEAEA"):
+    def add_room(self, room_id, name, points, level_id="level1", floor_color="#EAEAEA",
+                 with_walls=False, wall_thickness=15.0):
+        """Adds an architectural room polygon, optionally generating perimeter boundary walls."""
         r = Room(room_id, name, points, level_id, floor_color)
         self.rooms[r.id] = r
+        if with_walls and len(r.points) >= 3:
+            self.add_wall_loop(r.points, prefix=f"{room_id}_w", closed=True,
+                               thickness=wall_thickness, level_id=level_id)
         return r
 
     def remove_room(self, room_id):
@@ -116,6 +177,19 @@ class HomeModel:
             return True
         return False
 
+    # Dimension methods
+    def add_dimension(self, dimension_id, x_start, y_start, x_end, y_end, offset_cm=30.0,
+                      level_id="level1", elevation_cm=0.0):
+        dim = DimensionLine(dimension_id, x_start, y_start, x_end, y_end, offset_cm, level_id, elevation_cm)
+        self.dimensions[dim.id] = dim
+        return dim
+
+    def remove_dimension(self, dimension_id):
+        if dimension_id in self.dimensions:
+            del self.dimensions[dimension_id]
+            return True
+        return False
+
     @property
     def total_area_m2(self):
         """Sum of all room floor areas in square meters."""
@@ -126,11 +200,74 @@ class HomeModel:
         """Total run of walls in linear meters."""
         return round(sum(w.length_m for w in self.walls.values()), 2)
 
-    def validate(self):
-        """Runs architectural validation checks.
+    def takeoff(self):
+        """Generates an architectural takeoff / Bill of Quantities (BOQ / RAB) analysis."""
+        # 1. Floor & Ceiling Takeoff
+        total_floor_m2 = self.total_area_m2
+        total_skirting_m = round(sum(r.perimeter_cm / 100.0 for r in self.rooms.values()), 2)
+        ceiling_m2 = total_floor_m2
+
+        # 2. Wall & Masonry Takeoff
+        # Gross wall area = sum(length * height)
+        gross_wall_m2 = round(sum((w.length * w.height) / 10000.0 for w in self.walls.values()), 2)
         
-        Returns a dictionary with status and list of warnings/errors.
-        """
+        # Openings subtraction area = sum(width * height)
+        openings_m2 = round(sum((op.width_cm * op.height_cm) / 10000.0 for op in self.openings.values()), 2)
+        net_wall_masonry_m2 = round(max(0.0, gross_wall_m2 - openings_m2), 2)
+        interior_paint_m2 = round(net_wall_masonry_m2 * 2.0, 2)  # both sides
+
+        # 3. Furniture inventory tally
+        furn_counts = Counter(f.name for f in self.furniture.values())
+        furn_catalog_counts = Counter(f.catalog_id for f in self.furniture.values())
+
+        doors_deduction_m = sum(op.width_cm / 100.0 for op in self.openings.values() if op.opening_type == "door")
+        skirting_net_m = round(max(0.0, total_skirting_m - doors_deduction_m), 2)
+
+        summary = {
+            "wall_perimeter_m": self.total_wall_length_m,
+            "wall_gross_area_m2": gross_wall_m2,
+            "wall_net_area_m2": net_wall_masonry_m2,
+            "wall_paint_area_m2": interior_paint_m2,
+            "floor_area_m2": total_floor_m2,
+            "skirting_length_m": skirting_net_m,
+            "dimensions_count": len(self.dimensions),
+            "openings_count": len(self.openings),
+            "furniture_count": len(self.furniture),
+        }
+
+        return {
+            "project_name": self.name,
+            "summary": summary,
+            "floor_and_ceiling": {
+                "total_floor_area_m2": total_floor_m2,
+                "ceiling_plasterboard_m2": ceiling_m2,
+                "skirting_baseboard_linear_m": total_skirting_m,
+                "rooms_breakdown": [
+                    {"id": r.id, "name": r.name, "area_m2": r.area_m2, "perimeter_m": round(r.perimeter_cm / 100.0, 2)}
+                    for r in self.rooms.values()
+                ]
+            },
+            "masonry_and_walls": {
+                "total_wall_length_m": self.total_wall_length_m,
+                "gross_wall_surface_m2": gross_wall_m2,
+                "openings_deduction_m2": openings_m2,
+                "net_masonry_wall_m2": net_wall_masonry_m2,
+                "interior_wall_paint_m2": interior_paint_m2,
+            },
+            "openings_schedule": {
+                "doors_count": sum(1 for op in self.openings.values() if op.opening_type == "door"),
+                "windows_count": sum(1 for op in self.openings.values() if op.opening_type == "window"),
+                "total_openings_count": len(self.openings),
+            },
+            "furniture_schedule": {
+                "total_items": len(self.furniture),
+                "by_name": dict(furn_counts),
+                "by_catalog_id": dict(furn_catalog_counts),
+            }
+        }
+
+    def validate(self):
+        """Runs architectural validation checks."""
         errors = []
         warnings = []
 
@@ -164,6 +301,7 @@ class HomeModel:
                 "rooms_count": len(self.rooms),
                 "openings_count": len(self.openings),
                 "furniture_count": len(self.furniture),
+                "dimensions_count": len(self.dimensions),
                 "total_area_m2": self.total_area_m2,
                 "total_wall_length_m": self.total_wall_length_m,
             }
@@ -180,10 +318,15 @@ class HomeModel:
 
         # Walls
         for w in self.walls.values():
-            ET.SubElement(root, "wall", id=w.id, level=w.level_id,
-                          xStart=str(w.x_start), yStart=str(w.y_start),
-                          xEnd=str(w.x_end), yEnd=str(w.y_end),
-                          thickness=str(w.thickness), height=str(w.height))
+            wall_attrib = {
+                "id": w.id, "level": w.level_id,
+                "xStart": str(w.x_start), "yStart": str(w.y_start),
+                "xEnd": str(w.x_end), "yEnd": str(w.y_end),
+                "thickness": str(w.thickness), "height": str(w.height),
+            }
+            if abs(w.arc_extent) > 1e-4:
+                wall_attrib["arcExtent"] = str(w.arc_extent)
+            ET.SubElement(root, "wall", **wall_attrib)
 
         # Rooms
         for r in self.rooms.values():
@@ -206,7 +349,13 @@ class HomeModel:
                           width=str(f.width_cm), depth=str(f.depth_cm), height=str(f.height_cm),
                           angle=str(f.angle_deg))
 
-        # Format pretty XML
+        # Dimensions
+        for dim in self.dimensions.values():
+            ET.SubElement(root, "dimensionLine", id=dim.id, level=dim.level_id,
+                          xStart=str(dim.x_start), yStart=str(dim.y_start),
+                          xEnd=str(dim.x_end), yEnd=str(dim.y_end),
+                          offset=str(dim.offset_cm), elevation=str(dim.elevation_cm))
+
         rough_string = ET.tostring(root, "utf-8")
         reparsed = minidom.parseString(rough_string)
         return reparsed.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
@@ -244,6 +393,7 @@ class HomeModel:
                 thickness=float(elem.attrib.get("thickness", 15.0)),
                 height=float(elem.attrib.get("height", 280.0)),
                 level_id=elem.attrib.get("level", "level1"),
+                arc_extent=float(elem.attrib.get("arcExtent", 0.0)),
             )
 
         # Rooms
@@ -288,6 +438,19 @@ class HomeModel:
                 level_id=elem.attrib.get("level", "level1"),
             )
 
+        # Dimensions
+        for elem in root.findall("dimensionLine"):
+            model.add_dimension(
+                dimension_id=elem.attrib.get("id"),
+                x_start=float(elem.attrib.get("xStart", 0.0)),
+                y_start=float(elem.attrib.get("yStart", 0.0)),
+                x_end=float(elem.attrib.get("xEnd", 0.0)),
+                y_end=float(elem.attrib.get("yEnd", 0.0)),
+                offset_cm=float(elem.attrib.get("offset", 30.0)),
+                level_id=elem.attrib.get("level", "level1"),
+                elevation_cm=float(elem.attrib.get("elevation", 0.0)),
+            )
+
         return model
 
     def save_sh3d(self, filepath):
@@ -319,6 +482,7 @@ class HomeModel:
             "rooms": [r.to_dict() for r in self.rooms.values()],
             "openings": [op.to_dict() for op in self.openings.values()],
             "furniture": [f.to_dict() for f in self.furniture.values()],
+            "dimensions": [dim.to_dict() for dim in self.dimensions.values()],
             "summary": {
                 "total_area_m2": self.total_area_m2,
                 "total_wall_length_m": self.total_wall_length_m,
@@ -347,4 +511,7 @@ class HomeModel:
         for f in d.get("furniture", []):
             f_obj = Furniture.from_dict(f)
             model.furniture[f_obj.id] = f_obj
+        for dim in d.get("dimensions", []):
+            dim_obj = DimensionLine.from_dict(dim)
+            model.dimensions[dim_obj.id] = dim_obj
         return model

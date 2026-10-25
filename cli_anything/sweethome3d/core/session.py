@@ -58,11 +58,19 @@ class SessionManager:
     def __init__(self, session_path=SESSION_FILE):
         self.session_path = session_path
         self.active_file = None
+        self.current_level_id = "level1"
         self.model = HomeModel("Default Home")
         self.undo_stack = []
         self.redo_stack = []
         self.max_history = 30
         self.load_session()
+
+    def set_current_level(self, level_id):
+        if not self.model.get_level(level_id):
+            raise ValueError(f"Level '{level_id}' does not exist in model.")
+        self.current_level_id = level_id
+        self.save_session()
+        return level_id
 
     def push_state(self):
         """Saves current model state to undo stack before a mutation."""
@@ -141,6 +149,7 @@ class SessionManager:
     def save_session(self):
         data = {
             "active_file": self.active_file,
+            "current_level_id": self.current_level_id,
             "model": self.model.to_dict(),
             "undo_count": len(self.undo_stack),
             "redo_count": len(self.redo_stack),
@@ -156,6 +165,7 @@ class SessionManager:
                 with open(self.session_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.active_file = data.get("active_file")
+                    self.current_level_id = data.get("current_level_id", "level1")
                     if "model" in data:
                         self.model = HomeModel.from_dict(data["model"])
             except Exception:

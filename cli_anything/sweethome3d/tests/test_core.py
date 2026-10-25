@@ -7,8 +7,10 @@ from cli_anything.sweethome3d.core.wall import Wall
 from cli_anything.sweethome3d.core.room import Room
 from cli_anything.sweethome3d.core.opening import Opening
 from cli_anything.sweethome3d.core.furniture import Furniture, FURNITURE_CATALOG
+from cli_anything.sweethome3d.core.dimension import DimensionLine
 from cli_anything.sweethome3d.core.project import HomeModel
 from cli_anything.sweethome3d.core.session import SessionManager, _locked_save_json
+from cli_anything.sweethome3d.core.export import export_html
 
 def test_wall_properties():
     # 6m wall horizontal
@@ -165,3 +167,97 @@ def test_locked_save_json():
     finally:
         if os.path.exists(test_file):
             os.remove(test_file)
+
+def test_dimension_line():
+    # 5m horizontal line from (0,0) to (500,0) with offset 30cm
+    dim = DimensionLine("d1", 0.0, 0.0, 500.0, 0.0, offset_cm=30.0)
+    assert dim.length == 500.0
+    assert dim.length_m == 5.0
+    p1_off, p2_off = dim.offset_endpoints()
+    # perpendicular vector for (500, 0) is (0, 1) * 30 => (0, 30)
+    assert p1_off == (0.0, 30.0)
+    assert p2_off == (500.0, 30.0)
+    assert dim.label_pos() == (250.0, 30.0)
+    assert dim.formatted_label() == "5.00 m"
+
+    d_dict = dim.to_dict()
+    assert d_dict["id"] == "d1"
+    dim_loaded = DimensionLine.from_dict(d_dict)
+    assert dim_loaded.id == "d1"
+    assert dim_loaded.length == 500.0
+
+def test_curved_wall_arc():
+    import math
+    # 90-degree arc wall
+    w = Wall("w_arc", 0.0, 0.0, 400.0, 0.0, arc_extent=90.0)
+    assert w.arc_extent == 90.0
+    # Arc length should be greater than chord length (400)
+    assert w.arc_length > 400.0
+    assert w.arc_length_m > 4.0
+    d = w.to_dict()
+    assert "arc_extent" in d
+    w_loaded = Wall.from_dict(d)
+    assert w_loaded.arc_extent == 90.0
+
+def test_add_wall_loop_and_with_walls():
+    model = HomeModel("Loop Test")
+    pts = [(0.0, 0.0), (600.0, 0.0), (600.0, 400.0), (0.0, 400.0)]
+    walls = model.add_wall_loop(pts, prefix="outer")
+    assert len(walls) == 4
+    assert "outer_1" in model.walls
+    assert "outer_4" in model.walls
+    assert model.walls["outer_1"].x2 == 600.0
+    assert model.walls["outer_4"].x2 == 0.0
+
+    # Test add_room with with_walls=True
+    r = model.add_room("room_auto", "Auto Room", [(1000.0, 0.0), (1400.0, 0.0), (1400.0, 300.0), (1000.0, 300.0)], with_walls=True)
+    assert r.id == "room_auto"
+    assert "room_auto_w_1" in model.walls
+    assert "room_auto_w_4" in model.walls
+
+def test_takeoff_boq():
+    model = HomeModel("Takeoff House", wall_height=300.0)
+    pts = [(0.0, 0.0), (600.0, 0.0), (600.0, 400.0), (0.0, 400.0)]
+    model.add_wall_loop(pts, prefix="w")
+    model.add_room("r1", "Living", pts)
+    # Add door (1m x 2.1m = 2.1 m²) on w1
+    model.add_opening("d1", "Door", "w_1", offset_cm=100.0, width_cm=100.0, height_cm=210.0)
+    # Add dimension
+    model.add_dimension("dim1", 0.0, 0.0, 600.0, 0.0, offset_cm=50.0)
+
+    takeoff = model.takeoff()
+    summary = takeoff["summary"]
+    # Perimeter: 2*(6+4) = 20m. Gross wall area = 20m * 3m = 60 m².
+    assert summary["wall_perimeter_m"] == 20.0
+    assert summary["wall_gross_area_m2"] == 60.0
+    # Net wall area = 60.0 - 2.1 = 57.9 m²
+    assert summary["wall_net_area_m2"] == 57.9
+    # Paint interior + exterior = 2 * net = 115.8 m²
+    assert summary["wall_paint_area_m2"] == 115.8
+    # Floor area = 24.0 m²
+    assert summary["floor_area_m2"] == 24.0
+    assert summary["skirting_length_m"] == 19.0  # 20 - 1m door
+    assert summary["dimensions_count"] == 1
+
+def test_html_export():
+    model = HomeModel("HTML Suite")
+    pts = [(0.0, 0.0), (500.0, 0.0), (500.0, 400.0), (0.0, 400.0)]
+    model.add_wall_loop(pts, prefix="w")
+    model.add_room("r1", "Suite", pts)
+    model.add_dimension("dim1", 0.0, 0.0, 500.0, 0.0)
+
+    with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
+        html_path = tmp.name
+
+    try:
+        export_html(model, html_path)
+        assert os.path.exists(html_path)
+        with open(html_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        assert "<!DOCTYPE html>" in content
+        assert "HTML Suite" in content
+        assert "Architectural Floor Plan Viewer" in content
+        assert "takeoff-panel" in content
+    finally:
+        if os.path.exists(html_path):
+            os.remove(html_path)

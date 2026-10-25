@@ -155,3 +155,68 @@ def test_subprocess_cli():
     data = json.loads(result.stdout)
     assert data["status"] == "success"
     assert "summary" in data["data"]
+
+def test_e2e_refinement_features():
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        html_file = os.path.join(tmpdir, "interactive.html")
+
+        # 1. New project
+        res = runner.invoke(cli, ["--json", "project", "new", "--name", "Modern Villa"])
+        assert res.exit_code == 0
+
+        # 2. Add wall loop (8m x 6m perimeter = 4 walls)
+        pts = "0,0;800,0;800,600;0,600"
+        res = runner.invoke(cli, ["--json", "wall", "add-loop", "--points", pts, "--prefix", "ext_wall"])
+        assert res.exit_code == 0
+        d = json.loads(res.output)
+        assert d["status"] == "success"
+        assert len(d["data"]["created_walls"]) == 4
+
+        # 3. Add room with-walls for master bath (3m x 2m inside)
+        bath_pts = "500,0;800,0;800,200;500,200"
+        res = runner.invoke(cli, ["--json", "room", "add", "--id", "r_bath", "--name", "Master Bath", "--points", bath_pts, "--with-walls"])
+        assert res.exit_code == 0
+        d = json.loads(res.output)
+        assert d["status"] == "success"
+        assert d["data"]["area_m2"] == 6.0
+
+        # 4. Add dimension lines
+        res = runner.invoke(cli, ["--json", "dimension", "add", "--id", "dim_width", "--x1", "0", "--y1", "0", "--x2", "800", "--y2", "0", "--offset", "60"])
+        assert res.exit_code == 0
+        d = json.loads(res.output)
+        assert d["status"] == "success"
+        assert d["data"]["length_m"] == 8.0
+
+        # List dimensions
+        res = runner.invoke(cli, ["--json", "dimension", "list"])
+        assert res.exit_code == 0
+        d = json.loads(res.output)
+        assert len(d["data"]) == 1
+
+        # 5. Takeoff BOQ calculation
+        res = runner.invoke(cli, ["--json", "project", "takeoff"])
+        assert res.exit_code == 0
+        d = json.loads(res.output)
+        assert d["status"] == "success"
+        boq = d["data"]["summary"]
+        assert boq["dimensions_count"] == 1
+        assert boq["wall_gross_area_m2"] > 0
+        assert boq["floor_area_m2"] >= 6.0
+
+        # 6. Export interactive HTML
+        res = runner.invoke(cli, ["--json", "export", "html", "-o", html_file])
+        assert res.exit_code == 0
+        assert os.path.exists(html_file)
+        with open(html_file, "r", encoding="utf-8") as f:
+            content = f.read()
+        assert "Modern Villa" in content
+        assert "takeoff-panel" in content
+
+        # 7. Level management and set-current
+        res = runner.invoke(cli, ["--json", "level", "add", "--id", "lvl2", "--name", "Second Floor", "--elevation", "300"])
+        assert res.exit_code == 0
+        res = runner.invoke(cli, ["--json", "level", "set-current", "--id", "lvl2"])
+        assert res.exit_code == 0
+        d = json.loads(res.output)
+        assert d["data"]["current_level_id"] == "lvl2"
