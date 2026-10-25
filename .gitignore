@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+output/
+dist/
+build/
+*.sh3d
+*.svg
+*.dxf
+.cli_anything_*
