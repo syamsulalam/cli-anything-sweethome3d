@@ -27,6 +27,8 @@ from cli_anything.sweethome3d.core.dimension import DimensionLine
 from cli_anything.sweethome3d.core.project import HomeModel, _make_door_sector_poly
 from cli_anything.sweethome3d.core.session import SessionManager, _locked_save_json, _calc_sha256, ConcurrencyConflictError, RecoveryRequiredError
 from cli_anything.sweethome3d.core.export import export_html, export_svg, export_dxf, calculate_bounds
+from cli_anything.sweethome3d.core.native_contract import assert_native_wire
+from cli_anything.sweethome3d.core.native_contract import assert_native_wire
 
 def test_wall_properties():
     # 6m wall horizontal
@@ -328,11 +330,11 @@ def test_door_swing_svg_distinct():
 
 def test_roundtrip_preservation_of_unmodeled_xml_and_zip_entries():
     xml_src = """<?xml version="1.0" encoding="utf-8"?>
-<home version="7.5" name="Test Extra" customRootProp="preserved123">
+<home version="7400" name="Test Extra" basePlanLocked="true">
+  <camera attribute="topCamera" x="100.0" y="200.0" z="170.0" yaw="0.0" pitch="0.0" fieldOfView="1.0"/>
+  <observerCamera attribute="observerCamera" x="150.0" y="250.0" z="170.0" yaw="0.0" pitch="0.0" fieldOfView="1.0"/>
   <level id="level1" name="Ground Floor" elevation="0.0" height="280.0" floorThickness="12.0"/>
   <wall id="w1" level="level1" xStart="0.0" yStart="0.0" xEnd="400.0" yEnd="0.0" thickness="15.0" height="280.0"/>
-  <camera x="100.0" y="200.0" z="170.0" fieldOfView="1.0"/>
-  <observer camera="cam1"/>
 </home>
 """
     archive_path = os.path.join(tempfile.gettempdir(), "test_extra_unit.sh3d")
@@ -345,7 +347,7 @@ def test_roundtrip_preservation_of_unmodeled_xml_and_zip_entries():
             z.writestr("Plugin.properties", b"key=value")
 
         m = HomeModel.load_sh3d(archive_path)
-        assert "customRootProp" in m.extra_root_attribs
+        assert "basePlanLocked" in m.extra_root_attribs
         assert len(m.extra_elements) == 2
         assert "textures/wood.png" in m.extra_zip_entries
 
@@ -357,9 +359,9 @@ def test_roundtrip_preservation_of_unmodeled_xml_and_zip_entries():
             assert "Plugin.properties" in names
             assert z.read("textures/wood.png") == b"fake-png-bytes"
             xml_out = z.read("Home.xml").decode("utf-8")
-            assert 'customRootProp="preserved123"' in xml_out
+            assert 'basePlanLocked="true"' in xml_out
             assert "<camera" in xml_out
-            assert "<observer" in xml_out
+            assert "<observerCamera" in xml_out
     finally:
         if os.path.exists(archive_path):
             os.remove(archive_path)
@@ -446,23 +448,23 @@ def test_door_sweep_sector_furniture_collision():
 
 def test_entity_unmodeled_attributes_and_nested_properties_preserved():
     xml_src = """<?xml version="1.0" encoding="utf-8"?>
-<home version="7.5" name="Custom Home">
-  <level id="level1" name="Ground Floor" elevation="0.0" height="280.0" floorThickness="25.0" customLevelAttr="yes"/>
-  <wall id="w1" level="level1" xStart="0.0" yStart="0.0" xEnd="400.0" yEnd="0.0" thickness="15.0" height="280.0" leftSideColor="#112233">
+<home version="7400" name="Custom Home">
+  <level id="level1" name="Ground Floor" elevation="0.0" height="280.0" floorThickness="25.0" viewable="false"/>
+  <wall id="w1" level="level1" xStart="0.0" yStart="0.0" xEnd="400.0" yEnd="0.0" thickness="15.0" height="280.0" leftSideColor="00112233">
     <property name="material" value="brick"/>
   </wall>
 </home>
 """
     m = HomeModel.from_xml(xml_src)
     assert m.levels[0].floor_thickness_cm == 25.0
-    assert m.levels[0].extra_attribs.get("customLevelAttr") == "yes"
-    assert m.walls["w1"].extra_attribs.get("leftSideColor") == "#112233"
+    assert m.levels[0].extra_attribs.get("viewable") == "false"
+    assert m.walls["w1"].extra_attribs.get("leftSideColor") == "00112233"
     assert len(m.walls["w1"].extra_children) == 1
 
     xml_out = m.to_xml()
     assert 'floorThickness="25.0"' in xml_out
-    assert 'customLevelAttr="yes"' in xml_out
-    assert 'leftSideColor="#112233"' in xml_out
+    assert 'viewable="false"' in xml_out
+    assert 'leftSideColor="00112233"' in xml_out
     assert 'name="material"' in xml_out
 
 def test_level_filtered_json_excludes_dangling_openings():
@@ -527,7 +529,7 @@ def test_door_sweep_arc_boundary_crossing_collision():
 
 def test_native_opening_pose_and_elevation_preserved():
     import xml.etree.ElementTree as ET
-    xml_src = """<home version="7500">
+    xml_src = """<home version="7400">
   <level id="level1" name="Ground" elevation="0" height="280" floorThickness="25"/>
   <doorOrWindow id="win" name="Window" level="level1" x="250" y="0"
       elevation="90" width="120" depth="20" height="120" angle="0"/>
@@ -652,10 +654,10 @@ def test_stale_save_file_does_not_overwrite_destination():
             assert json.load(fp)["name"] == "newer"
 
 def test_native_reversed_opening_pose_preserved_in_xml():
-    xml = """<home>
-      <wall id="w" xStart="0" yStart="0" xEnd="500" yEnd="0"/>
-      <doorOrWindow id="d" x="250" y="0" angle="3.141592653589793"
+    xml = """<home version="7400">
+      <doorOrWindow id="d" name="Door" x="250" y="0" angle="3.141592653589793"
         width="90" depth="20" height="210"/>
+      <wall id="w" xStart="0" yStart="0" xEnd="500" yEnd="0" thickness="15"/>
     </home>"""
     m = HomeModel.from_xml(xml)
     assert m.openings["d"].angle_deg == 180.0
@@ -744,10 +746,10 @@ def test_two_phase_commit_destination_failure_reconciles_cleanly():
 
 def test_hosted_opening_svg_matches_native_pose_and_validation():
     with tempfile.TemporaryDirectory() as td:
-        home = HomeModel.from_xml('''<home>
-          <wall id="w" xStart="0" yStart="0" xEnd="500" yEnd="0"/>
-          <doorOrWindow id="d" x="250" y="0" angle="3.141592653589793"
+        home = HomeModel.from_xml('''<home version="7400">
+          <doorOrWindow id="d" name="Door" x="250" y="0" angle="3.141592653589793"
             width="90" depth="20" height="210"/>
+          <wall id="w" xStart="0" yStart="0" xEnd="500" yEnd="0" thickness="15"/>
         </home>''')
         home.add_furniture("f", "Negative-side object", x_cm=250, y_cm=-40, width_cm=20, depth_cm=20)
         assert any(f["code"] == "DOOR_SWEEP_COLLISION" for f in home.validate()["findings"])
@@ -2675,7 +2677,7 @@ def test_strict_validation_error_uses_versioned_envelope(tmp_path,monkeypatch):
     mgr = SessionManager(str(tmp_path/'session.json'))
     mgr.model.add_wall('zero',0,0,0,0)
     monkeypatch.setattr(cli_module,'_session_mgr',mgr)
-    r = CliRunner().invoke(cli_module.cli,['--json','project','validate','--strict'])
+    r = CliRunner().invoke(cli_module.cli,['--json','--session',str(tmp_path/'session.json'),'project','validate','--strict'])
     assert r.exit_code != 0
     p = json.loads(r.stdout)
     assert p.get('protocol_version') == '1'
@@ -3097,7 +3099,7 @@ def test_doctor_checks_session_journal_when_artifact_is_active(tmp_path, monkeyp
     journal.write_text('{}', encoding='utf-8')
     before = {p: p.read_bytes() for p in (session, artifact, journal)}
     monkeypatch.setattr(cli_module, '_session_mgr', mgr)
-    result = CliRunner().invoke(cli_module.cli, ['--json', 'doctor'])
+    result = CliRunner().invoke(cli_module.cli, ['--json', '--session', str(session), 'doctor'])
     assert result.output.strip(), repr(result.exception)
     payload = json.loads(result.output)
     assert payload['data']['healthy'] is False
@@ -3167,7 +3169,7 @@ def test_doctor_rejects_invalid_session_shape_with_warm_manager(tmp_path, monkey
     mgr.save_session()
     session.write_text(raw, encoding='utf-8')
     monkeypatch.setattr(cli_module, '_session_mgr', mgr)
-    result = CliRunner().invoke(cli_module.cli, ['--json', 'doctor'])
+    result = CliRunner().invoke(cli_module.cli, ['--json', '--session', str(session), 'doctor'])
     assert result.output.strip(), repr(result.exception)
     payload = json.loads(result.output)
     assert payload['data']['healthy'] is False
@@ -3271,7 +3273,7 @@ def test_doctor_rejects_invalid_present_session_revision(tmp_path, monkeypatch, 
     raw = json.dumps(data)
     session.write_text(raw, encoding='utf-8')
     monkeypatch.setattr(cli_module, '_session_mgr', mgr)
-    result = CliRunner().invoke(cli_module.cli, ['--json', 'doctor'])
+    result = CliRunner().invoke(cli_module.cli, ['--json', '--session', str(session), 'doctor'])
     assert result.output.strip(), repr(result.exception)
     payload = json.loads(result.output)
     assert payload['protocol_version'] == '1'
@@ -3613,24 +3615,108 @@ def test_t_hole_ring_owns_material_side_not_void_side():
     assert edge["faces"]["negative"]["room_id"] == "A"
     assert edge["faces"]["positive"]["room_id"] is None
 
+# ==============================================================================
+# PAC-1 Round 26 Acceptance Oracles (Public Native Boundary & Invocation Authority)
+# ==============================================================================
+
+def _r26_model():
+    model = HomeModel()
+    model.add_wall("w", 0, 0, 300, 0)
+    model.add_opening("d", "Door", wall_id="w", offset_cm=100, width_cm=90)
+    model.add_furniture("f", "Furniture", x_cm=100, y_cm=200,
+                        width_cm=50, depth_cm=50, height_cm=50)
+    return model
 
 
+@pytest.mark.parametrize("case", ["attribute", "order", "wall_nan", "opening_nan", "furniture_nan"])
+def test_native_default_import_cannot_bypass_profile(case):
+    root = ET.fromstring(_r26_model().to_xml())
+    if case == "attribute":
+        root.find("wall").set("forbidden", "1")
+    elif case == "order":
+        first = root.find("level"); root.remove(first); root.append(first)
+    else:
+        tag, attr = {"wall_nan": ("wall", "arcExtent"),
+                     "opening_nan": ("doorOrWindow", "angle"),
+                     "furniture_nan": ("pieceOfFurniture", "angle")}[case]
+        root.find(tag).set(attr, "NaN")
+    text = ET.tostring(root, encoding="unicode")
+    # Positive control on the existing guard: malformed fixture truly refuses.
+    with pytest.raises(ValueError):
+        assert_native_wire(text)
+    # Public import must enforce that contract without a caller opt-in.
+    with pytest.raises(ValueError):
+        HomeModel.from_xml(text)
 
 
+@pytest.mark.parametrize("route", ["to_xml", "save_sh3d", "session_save"])
+def test_native_publication_refuses_invalid_wire_before_commit(tmp_path, route):
+    model = _r26_model()
+    model.walls["w"].extra_attribs["forbidden"] = "1"
+    target = tmp_path / "destination.sh3d"
+    target.write_bytes(b"existing destination must survive")
+    original_target = target.read_bytes()
+    if route == "to_xml":
+        with pytest.raises(ValueError):
+            model.to_xml()
+    elif route == "save_sh3d":
+        with pytest.raises(ValueError):
+            model.save_sh3d(str(target))
+    else:
+        manager = SessionManager(str(tmp_path / "session.json"))
+        manager.save_session()
+        manager.model = model
+        revision = manager.revision
+        session_bytes = (tmp_path / "session.json").read_bytes()
+        with pytest.raises(ValueError):
+            manager.save_file(str(target))
+        assert manager.revision == revision
+        assert (tmp_path / "session.json").read_bytes() == session_bytes
+    assert target.read_bytes() == original_target
 
 
+@pytest.mark.parametrize("dialect", ["guess", "cli-legacy-degrees-v1"])
+def test_native_entry_refuses_non_native_dialect_before_any_geometry(dialect):
+    # Empty valid native document ensures no angle-specific branch happens.
+    with pytest.raises(ValueError):
+        HomeModel.from_xml('<home version="7400"/>', dialect=dialect, validate=True)
 
 
+@pytest.mark.parametrize("validate", [False, True])
+def test_native_publication_enforces_qualified_coordinate_profile(validate):
+    model = HomeModel()
+    model.add_wall("w", 100001, 0, 100101, 0)
+    # R25 profile explicitly bounds core/native XY to +/-100000 cm.
+    with pytest.raises(ValueError):
+        model.to_xml(validate=validate)
 
 
+@pytest.mark.parametrize("entity", ["wall_arc", "wall_height", "opening_angle", "furniture_angle"])
+def test_native_publication_rejects_nonfinite_canonical_domain(entity):
+    model = _r26_model()
+    if entity == "wall_arc": model.walls["w"].arc_extent = float("nan")
+    elif entity == "wall_height": model.walls["w"].height = float("nan")
+    elif entity == "opening_angle": model.openings["d"].angle_deg = float("nan")
+    else: model.furniture["f"].angle_deg = float("nan")
+    with pytest.raises(ValueError):
+        model.to_xml()
 
 
-
-
-
-
-
-
-
-
+@pytest.mark.parametrize("command", ["info", "new"])
+def test_no_selector_invocation_cannot_inherit_foreign_global_cache(tmp_path, monkeypatch, command):
+    default_path, foreign_path = tmp_path / "default.json", tmp_path / "foreign.json"
+    default = SessionManager(str(default_path)); default.new_project("ExpectedDefault")
+    foreign = SessionManager(str(foreign_path)); foreign.new_project("Foreign")
+    foreign_before = foreign_path.read_bytes()
+    monkeypatch.setattr(cli_module, "SESSION_FILE", str(default_path))
+    monkeypatch.setattr(cli_module, "_session_mgr", foreign)
+    args = ["--json", "project", command]
+    if command == "new":
+        args += ["--name", "ChosenDefault"]
+    result = CliRunner().invoke(cli_module.cli, args)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert foreign_path.read_bytes() == foreign_before
+    assert payload["project"]["session_path"] == os.path.normcase(os.path.realpath(default_path))
+    assert payload["project"]["name"] == ("ExpectedDefault" if command == "info" else "ChosenDefault")
 

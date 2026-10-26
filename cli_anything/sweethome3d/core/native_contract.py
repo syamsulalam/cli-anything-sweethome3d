@@ -152,7 +152,10 @@ def validate_native_xml(xml_text, *, dtd_path, dtd_sha256, dialect="native-v7400
                      "offset", "angle", "arcExtent", "xAxis", "yAxis",
                      "startAngle", "endAngle", "wallHeight"):
             if elem.get(attr) is not None:
-                finite_number(elem.get(attr))
+                checked_native_float(
+                    elem.get(attr),
+                    coordinate=attr in {"x", "y", "xStart", "yStart", "xEnd", "yEnd"},
+                )
         for attr in ("width", "depth", "height", "thickness"):
             if elem.get(attr) is not None and finite_number(elem.get(attr)) <= 0:
                 raise ValueError("Nonpositive physical size: " + attr)
@@ -177,3 +180,50 @@ def assert_native_wire(text: str | bytes):
         return validate_native_xml(
             text, dtd_path=path, dtd_sha256=PINNED_GRAMMAR_SHA256
         )
+
+
+def assert_native_model_domain(model):
+    def check(value, *, xy=False, angle=False, optional=False):
+        if value is None and optional:
+            return
+        number = finite_number(value)
+        if not angle:
+            checked_native_float(number, coordinate=xy)
+
+    check(model.wall_height)
+    for level in model.levels:
+        for attr in ("elevation_cm", "height_cm", "floor_thickness_cm"):
+            check(getattr(level, attr))
+    for wall in model.walls.values():
+        for attr in ("x_start", "y_start", "x_end", "y_end"):
+            check(getattr(wall, attr), xy=True)
+        check(wall.thickness)
+        check(wall.height)
+        check(wall.arc_extent, angle=True)
+    for room in model.rooms.values():
+        for ring in [room.points] + list(room.holes or []):
+            for point in ring:
+                if len(point) != 2:
+                    raise ValueError("Native room point must have two coordinates")
+                check(point[0], xy=True)
+                check(point[1], xy=True)
+    for opening in model.openings.values():
+        for attr in ("offset_cm", "width_cm", "height_cm", "elevation_cm"):
+            check(getattr(opening, attr))
+        check(opening.depth_cm, optional=True)
+        check(opening.x_cm, xy=True, optional=True)
+        check(opening.y_cm, xy=True, optional=True)
+        check(opening.angle_deg, angle=True, optional=True)
+    for furniture in model.furniture.values():
+        check(furniture.x_cm, xy=True)
+        check(furniture.y_cm, xy=True)
+        for attr in ("width_cm", "depth_cm", "height_cm", "elevation_cm"):
+            check(getattr(furniture, attr))
+        check(furniture.angle_deg, angle=True)
+    for dimension in model.dimensions.values():
+        for attr in ("x_start", "y_start", "x_end", "y_end"):
+            check(getattr(dimension, attr), xy=True)
+        for attr in ("offset_cm", "elevation_cm",
+                     "elevation_start_cm", "elevation_end_cm"):
+            check(getattr(dimension, attr))
+

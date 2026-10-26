@@ -21,6 +21,7 @@ from cli_anything.sweethome3d.core.native_contract import (
     rgb_to_native,
     native_to_rgb,
     assert_native_wire,
+    assert_native_model_domain,
 )
 
 
@@ -1837,8 +1838,10 @@ class HomeModel:
             }
         }
 
-    def to_xml(self, *, validate=False):
+    def to_xml(self, *, validate=True):
         """Generates valid Sweet Home 3D Home.xml string preserving extra nodes and attributes."""
+        assert_native_model_domain(self)
+
         def _format_native_color(col_str):
             if not col_str:
                 return col_str
@@ -2073,15 +2076,15 @@ class HomeModel:
         rough_string = ET.tostring(root, "utf-8")
         reparsed = minidom.parseString(rough_string)
         text = reparsed.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
-        if validate:
-            assert_native_wire(text)
+        assert_native_wire(text)
         return text
 
     @classmethod
-    def from_xml(cls, xml_text, *, dialect="native-v7400", validate=False):
+    def from_xml(cls, xml_text, *, dialect="native-v7400", validate=True):
         """Parses Sweet Home 3D Home.xml into a HomeModel instance preserving unmodeled elements."""
-        if validate:
-            assert_native_wire(xml_text)
+        if dialect != "native-v7400":
+            raise ValueError("Use an explicit legacy conversion before native import")
+        assert_native_wire(xml_text)
         root = ET.fromstring(xml_text)
         model = cls(
             name=root.attrib.get("name", "Imported Home"),
@@ -2134,10 +2137,7 @@ class HomeModel:
             raw_arc = elem.attrib.get("arcExtent")
             arc_val = 0.0
             if raw_arc is not None:
-                try:
-                    arc_val = round(decode_angle(raw_arc, dialect=dialect, wall_arc=True), 4)
-                except ValueError:
-                    arc_val = 0.0
+                arc_val = decode_angle(raw_arc, dialect=dialect, wall_arc=True)
 
             model.add_wall(
                 wall_id=elem.attrib.get("id"),
@@ -2267,10 +2267,7 @@ class HomeModel:
             y_cm = float(elem.attrib["y"]) if "y" in elem.attrib else None
             angle_deg = None
             if "angle" in elem.attrib:
-                try:
-                    angle_deg = round(decode_angle(elem.attrib["angle"], dialect=dialect) % 360.0, 6)
-                except ValueError:
-                    angle_deg = None
+                angle_deg = decode_angle(elem.attrib["angle"], dialect=dialect) % 360.0
             level_id = elem.attrib.get("level", "level1")
 
             # Native opening handling without 'wall' or with spatial coordinates
@@ -2328,10 +2325,7 @@ class HomeModel:
             extra_attribs = {k: v for k, v in elem.attrib.items() if k not in known_f_keys}
             extra_children = [ET.tostring(c, encoding="unicode") for c in elem]
 
-            try:
-                angle_deg = round(decode_angle(elem.attrib.get("angle", "0"), dialect=dialect) % 360.0, 6)
-            except ValueError:
-                angle_deg = 0.0
+            angle_deg = decode_angle(elem.attrib.get("angle", "0"), dialect=dialect) % 360.0
 
             model.add_furniture(
                 furniture_id=elem.attrib.get("id"),

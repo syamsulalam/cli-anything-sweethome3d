@@ -296,14 +296,13 @@ def cli(ctx, json_mode, project_path=None, session_path=None):
         if project_path is not None or session_path is not None:
             raise click.UsageError("Start a new invocation to change REPL authority", ctx)
     else:
-        def_sess = getattr(_session_mgr, "session_path", None) or SESSION_FILE
         try:
             ctx.obj["resolution"] = resolve_invocation(
-                project_path, session_path, default_session=def_sess
+                project_path, session_path, default_session=SESSION_FILE
             )
         except (ValueError, OSError) as exc:
             raise click.UsageError(str(exc), ctx) from exc
-        ctx.obj["invocation_manager"] = _session_mgr if (project_path is None and session_path is None and _session_mgr is not None) else None
+        ctx.obj["invocation_manager"] = None
     ctx.obj["json"] = json_mode
     if ctx.invoked_subcommand is None:
         if json_mode:

@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.16.0 (PAC-1 Contract Iteration 25)  
+**Document Version:** 2.17.0 (PAC-1 Contract Iteration 26)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -284,6 +284,32 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
   - Verify full repository test suite: **224 total tests passing in 8.79s** (220 core + 4 E2E; 100% green).
   - Verify all 4 built-in templates (`type36`, `type45`, `studio`, `pavilion`) pass offline DTD validation.
   - Pass Open Code Review (`ocr review` / `ocr delegate`). (`✅ Completed`)
+
+### Phase 21: Sol Round 26 Prescriptions — Unconditional Native Admission & Strict Default Authority Isolation (PAC-1 Iteration 26)
+- [x] **R26-P1-01: Unconditional Native Admission & Publication, Strict Dialect Rejection & Domain Guards (Gates N02, N03, N07, N09, C01, E02)**:
+  - In `core/native_contract.py`:
+    - Implement `assert_native_model_domain(model)` checking finite numbers, coordinate bounds ($\pm 100,000\text{ cm}$), thickness/height bounds, and angle domains across levels, walls, rooms, openings, furniture, and dimensions.
+    - In `validate_native_xml()`, check actual emitted numeric values with `checked_native_float(elem.get(attr), coordinate=attr in {"x", "y", "xStart", "yStart", "xEnd", "yEnd"})`.
+  - In `core/project.py`:
+    - In `from_xml()`, enforce `dialect == "native-v7400"` strictly upfront (rejecting non-native dialects like `"guess"` or `"cli-legacy-degrees-v1"` with `ValueError` before any field branch).
+    - In `from_xml()`, enforce `assert_native_wire(xml_text)` unconditionally (retaining `validate` parameter for compatibility without allowing safety bypass).
+    - Remove silent `try/except ValueError` fallbacks in `from_xml()`: invalid wall arcs, opening angles, and furniture angles fail fast (`ValueError`) rather than defaulting to `0.0` or `None`.
+    - In `to_xml()`, execute `assert_native_model_domain(self)` before serialization and `assert_native_wire(text)` unconditionally at exit.
+    - Enforce public wire validation on `save_sh3d()`, `load_sh3d()`, and session save/export before destination commit or session revision advance. (`✅ Completed`)
+- [x] **R26-P1-02: Strict Default Invocation Authority Isolation & Clean Manager Slot (Gates A01, A04, S04, S06)**:
+  - In `sweethome3d_cli.py`:
+    - In root `cli()` non-inherited branch, strictly resolve invocation using `default_session=SESSION_FILE` without borrowing `_session_mgr.session_path` or inspecting ambient global manager state.
+    - Initialize `ctx.obj["invocation_manager"] = None` so lazy per-invocation instantiations never leak from prior library callers.
+    - Update test fixtures in `tests/test_core.py` to pass `--session` explicitly or monkeypatch `SESSION_FILE` rather than relying on `_session_mgr` leaking default CLI authority. (`✅ Completed`)
+- [x] **Test Reconciliation & Oracle Integration**:
+  - Run `pytest` against `REPORT/2026-10-26_SweetHome3D_CLI_Round26_Acceptance_Oracles.py` to confirm all 18 cases pass.
+  - Merge all 18 oracles into `cli_anything/sweethome3d/tests/test_core.py` (target: 242 total passing tests).
+  - Verify all 4 architectural templates (`type36`, `type45`, `studio`, `pavilion`) pass offline DTD validation. (`✅ Completed`)
+- [x] **Open Code Review & Peer Review**:
+  - Run Open Code Review (`ocr delegate` / `ocr review`) with Gemini 3.8 Flash to confirm 0 blockers, 0 security issues, 0 regressions.
+  - Commit, push, upsert row in `LOGS.md`, record learning in `LEARNING/INDEX.md`, and sync to private backup mirror `MD-Syamsul-Alam`.
+  - Prompt Sol for Round 27 certification. (`✅ Completed`)
+
 
 
 
