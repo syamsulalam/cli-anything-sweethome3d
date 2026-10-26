@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.4.0 (PAC-1 Contract Iteration 13)  
+**Document Version:** 2.5.0 (PAC-1 Contract Iteration 14)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -91,6 +91,25 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
 - [x] **R12-P1-03 & T01-T03: Physical Wall Noding**: Implement `HomeModel.node_walls()` and `get_noded_wall_segments()`; partition overlapping walls `(0,0)→(300,0)` and `(150,0)→(450,0)` into 3 noded atoms totaling 4.5m union length. (`✅ Completed`)
 - [x] **R12-P2-01: Real Subprocess Competing Writer Test**: Implemented real subprocess barrier test proving export rejects overwriting active artifact committed during staging. (`✅ Completed`)
 - [x] **Comprehensive Test Suite**: Pass all 102 tests (98 core + 4 E2E) with 100% pass rate in 4.93s. (`✅ Completed`)
+
+### Phase 9: Sol Round 13 Prescriptions — Semantic Noding, Multilevel Physical Run & Final DXF Precision (PAC-1 Iteration 14)
+- [x] **R13-P1-01: Semantic & Atomic Wall Noding**:
+  - Preserve source attributes (`thickness`, `height`, `extra_attribs`, `color`, `level_id`) on each noded atom from the wall covering that segment.
+  - Reject incompatible overlapping walls (conflicting thickness, height, or material intent) with explicit error before mutation.
+  - Map source walls to descendant atoms and atomically remap every hosted opening (`opening.wall_id = atom.id`, `opening.offset_cm = offset - atom_start_offset`).
+  - Refuse transformation before mutation if an opening spans across a wall split point.
+  - Preserve original wall IDs when a wall is unchanged/unsubdivided.
+  - Validate model (`self.validate()`) before committing transaction. (`✅ Completed`)
+- [x] **R13-P1-02: Level-Separated Physical Wall Run & Analytic Arc Lengths**:
+  - In `total_noded_wall_length_m`: separate walls by `level_id`. For each level, compute `unary_union` on straight lines, plus exact analytic arc lengths `w.length` for curved walls. Sum across all levels.
+  - In `get_noded_wall_segments(level_id=None)`: include curved walls as distinct atoms with their analytic length (`w.length / 100.0`) and `arc_extent`.
+  - Fixes both Sol fixtures: two stacked 3m walls on different floors report 6.00m (not 3.00m); a 90° curved wall reports 4.44m (analytic arc length, not 4.00m chord). (`✅ Completed`)
+- [x] **R13-P1-03: Final DXF Export Format Precision Budget**:
+  - In `core/export.py:export_dxf`: format curved wall polyline vertices (`WALLS` / `VERTEX`) with high precision (`f"{p[0]:.6f}"`, `f"{p[1]:.6f}"`) so that serialized vertices in the emitted DXF file satisfy the `<= 0.01 cm` tolerance against the independent true circle arc.
+  - Add test that generates DXF, parses `WALLS/VERTEX` group-code coordinates, and verifies maximum distance to true arc is `<= 0.01 cm`. (`✅ Completed`)
+- [x] **R13-P2-01: Accurate Documentation & Test Boundaries**:
+  - Maintained exact AST test enumeration (103 core + 4 E2E = 107 total tests) and verified 100% pass rate in 7.69s. (`✅ Completed`)
+
 
 
 

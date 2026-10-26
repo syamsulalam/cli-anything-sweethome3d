@@ -1996,6 +1996,136 @@ def test_collinear_overlapping_walls_noded_into_three_atoms():
     assert len(m.walls) == 3
     assert m.total_wall_length_m == 4.50
 
+def test_semantic_wall_noding_preserves_attributes_and_remaps_openings():
+    """PAC-1 T01-T04, T06, R13-P1-01: Wall noding preserves source attributes and atomically remaps openings."""
+    m = HomeModel("Semantic Noding")
+    m.add_wall("host", 0, 0, 300, 0, thickness=15.0, height=280.0,
+               extra_attribs={"leftSideColor": "00FFFFFF"})
+    m.add_wall("thick", 150, 0, 150, 150, thickness=30.0, height=400.0)
+    m.add_opening("door", "Door", wall_id="host", offset_cm=200.0, width_cm=90.0)
+
+    noded_count = m.node_walls()
+    assert noded_count == 3
+
+    door = m.openings["door"]
+    assert door.wall_id in m.walls, "Door wall_id must point to an existing noded wall!"
+    assert door.offset_cm == 50.0, f"Door offset should be remapped to 50.0 cm, got {door.offset_cm}"
+
+    door_host = m.walls[door.wall_id]
+    assert door_host.thickness == 15.0
+    assert door_host.height == 280.0
+    assert door_host.extra_attribs.get("leftSideColor") == "00FFFFFF"
+
+    # Wall 'thick' was not split, should preserve its identity and attributes
+    assert "thick" in m.walls
+    assert m.walls["thick"].thickness == 30.0
+    assert m.walls["thick"].height == 400.0
+
+    val = m.validate()
+    assert val["valid"] is True, f"Validation failed after noding: {val['errors']}"
+
+def test_semantic_wall_noding_rejects_conflicting_overlapping_thickness():
+    """PAC-1 T04, R13-P1-01: Reject noding if overlapping collinear walls have conflicting thickness."""
+    m = HomeModel("Conflicting Overlap")
+    m.add_wall("w1", 0, 0, 300, 0, thickness=15.0, height=280.0)
+    m.add_wall("w2", 150, 0, 450, 0, thickness=30.0, height=280.0)
+
+    with pytest.raises(ValueError, match="Conflicting wall thickness"):
+        m.node_walls()
+
+    # Original model intact
+    assert len(m.walls) == 2
+    assert "w1" in m.walls and "w2" in m.walls
+
+def test_semantic_wall_noding_rejects_opening_spanning_split_point():
+    """PAC-1 T06, R13-P1-01: Refuse noding if an opening would be bisected by a wall split point."""
+    m = HomeModel("Opening On Split")
+    m.add_wall("host", 0, 0, 300, 0, thickness=15.0, height=280.0)
+    m.add_wall("cutter", 150, 0, 150, 150, thickness=15.0, height=280.0)
+    # Opening spans from 120 cm to 180 cm across split station 150 cm
+    m.add_opening("spanning_door", "Door", wall_id="host", offset_cm=120.0, width_cm=60.0)
+
+    with pytest.raises(ValueError, match="spans across split point"):
+        m.node_walls()
+
+    assert len(m.walls) == 2
+    assert m.openings["spanning_door"].wall_id == "host"
+
+def test_multilevel_and_curved_physical_wall_run_semantics():
+    """PAC-1 T01-T05, T09, R13-P1-02: Level separation and analytic arc lengths in physical wall run."""
+    m = HomeModel("Multilevel & Curved Run")
+    # level1 exists by default; add level2
+    m.add_level("level2", "Second", elevation_cm=300.0, height_cm=280.0)
+
+    # Fixture 1: Two 3m walls at identical XY on floors Z=0 and Z=3m
+    m.add_wall("w_fl1", 0, 0, 300, 0, level_id="level1")
+    m.add_wall("w_fl2", 0, 0, 300, 0, level_id="level2")
+    assert m.total_noded_wall_length_m == 6.00, f"Expected 6.00 m across 2 levels, got {m.total_noded_wall_length_m}"
+
+    # Fixture 2: One 90-deg curved wall (0,0)->(400,0) cm
+    m_curved = HomeModel("Curved Run")
+    m_curved.add_wall("arc_w", 0, 0, 400, 0, arc_extent=90.0)
+    # Analytic arc length = 100 * sqrt(2) * pi cm = 444.288... cm = 4.44 m
+    assert m_curved.total_noded_wall_length_m == 4.44, f"Expected 4.44 m analytic arc length, got {m_curved.total_noded_wall_length_m}"
+
+    segments = m_curved.get_noded_wall_segments()
+    assert len(segments) == 1
+    assert segments[0]["is_curved"] is True
+    assert segments[0]["arc_extent"] == 90.0
+    assert segments[0]["length_m"] == 4.443
+
+def test_dxf_curve_polyline_vertices_satisfy_0_01_error_budget():
+    """PAC-1 E02, E06, R13-P1-03: Serialized DXF VERTEX coordinates strictly satisfy <= 0.01 cm budget."""
+    from cli_anything.sweethome3d.core import export_dxf
+    m = HomeModel("DXF Precision")
+    m.add_wall("big_curve", -90000, 0, 90000, 0, thickness=20.0, height=280.0, arc_extent=90.0)
+
+    with tempfile.TemporaryDirectory() as td:
+        dxf_path = os.path.join(td, "precision.dxf")
+        export_dxf(m, dxf_path)
+
+        with open(dxf_path, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f]
+
+        # Parse WALLS / VERTEX group codes (code 10: X, code 20: Y)
+        dxf_pts = []
+        i = 0
+        while i < len(lines):
+            if lines[i] == "0" and i + 1 < len(lines) and lines[i + 1] == "VERTEX":
+                vx, vy = None, None
+                j = i + 2
+                while j < len(lines) and lines[j] != "0":
+                    if lines[j] == "10":
+                        vx = float(lines[j + 1])
+                    elif lines[j] == "20":
+                        vy = float(lines[j + 1])
+                    j += 2
+                if vx is not None and vy is not None:
+                    dxf_pts.append((vx, vy))
+                i = j
+            else:
+                i += 1
+
+        assert len(dxf_pts) > 100, f"Expected curve polyline vertices, found {len(dxf_pts)}"
+
+        # Compute max distance from true circular arc
+        c = 180000.0
+        r = c / (2.0 * math.sin(math.pi / 4.0))
+        center_x = 0.0
+        center_y = -r * math.cos(math.pi / 4.0)
+
+        max_dev = 0.0
+        for k in range(len(dxf_pts) - 1):
+            p1, p2 = dxf_pts[k], dxf_pts[k + 1]
+            mid_x = (p1[0] + p2[0]) / 2.0
+            mid_y = (p1[1] + p2[1]) / 2.0
+            dev = abs(math.hypot(mid_x - center_x, mid_y - center_y) - r)
+            if dev > max_dev:
+                max_dev = dev
+
+        assert max_dev <= 0.01, f"Serialized DXF vertex deviation {max_dev:.6f} cm exceeds 0.01 cm budget!"
+
+
 
 
 

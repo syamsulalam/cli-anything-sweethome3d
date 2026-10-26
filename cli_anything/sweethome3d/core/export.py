@@ -343,7 +343,7 @@ def export_dxf(model, filepath, level_id=None):
             pts = [w.point_at_offset(i * w.length / steps) for i in range(steps + 1)]
             dxf.extend(["0", "POLYLINE", "8", "WALLS", "66", "1", "70", "0"])
             for p in pts:
-                dxf.extend(["0", "VERTEX", "8", "WALLS", "10", f"{p[0]:.2f}", "20", f"{p[1]:.2f}", "30", "0.0"])
+                dxf.extend(["0", "VERTEX", "8", "WALLS", "10", f"{p[0]:.6f}", "20", f"{p[1]:.6f}", "30", "0.0"])
             dxf.extend(["0", "SEQEND"])
         else:
             dxf.extend([
