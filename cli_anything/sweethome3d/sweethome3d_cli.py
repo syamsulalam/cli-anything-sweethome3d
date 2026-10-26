@@ -19,12 +19,21 @@ from cli_anything.sweethome3d.utils.repl_skin import ReplSkin
 from cli_anything.sweethome3d.utils.sweethome3d_backend import find_sweethome3d, launch_gui, get_install_instructions
 from cli_anything.sweethome3d import __version__
 from cli_anything.sweethome3d.core import session as session_module
+from cli_anything.sweethome3d.core.invocation import resolve_invocation
 
 SESSION_FILE = getattr(session_module, "SESSION_FILE", os.path.expanduser("~/.cli_anything_sweethome3d_session.json"))
 
 _session_mgr = None
 
 def get_session_mgr():
+    root = click.get_current_context(silent=True)
+    root = root.find_root() if root is not None else None
+    if root is not None and "resolution" in (root.obj or {}):
+        mgr = root.obj.get("invocation_manager")
+        if mgr is None:
+            mgr = SessionManager(root.obj["resolution"]["session_path"])
+            root.obj["invocation_manager"] = mgr
+        return mgr
     global _session_mgr
     if _session_mgr is None:
         _session_mgr = SessionManager()
@@ -161,22 +170,40 @@ def safe_publish_export(output_path, generator_fn):
                 pass
 
 
+def project_context(ctx):
+    """Returns structured context identity without triggering unexpected session load (PAC-1 A01, A04, R25-A01)."""
+    if ctx is None:
+        return None
+    root = ctx.find_root()
+    if root is None or not (root.obj or {}).get("resolution"):
+        mgr = _session_mgr
+        if mgr is None:
+            return None
+        return {
+            "session_path": getattr(mgr, "session_path", None),
+            "authority_id": None,
+            "project_root": None,
+            "selection": "default",
+            "name": mgr.model.name if (mgr and getattr(mgr, "model", None)) else None,
+            "active_file": getattr(mgr, "active_file", None),
+            "revision": getattr(mgr, "revision", 0),
+        }
+    identity = dict(root.obj["resolution"])
+    mgr = root.obj.get("invocation_manager")
+    identity.update(
+        name=mgr.model.name if (mgr and getattr(mgr, "model", None)) else None,
+        active_file=mgr.active_file if mgr else None,
+        revision=getattr(mgr, "revision", None) if mgr else None,
+    )
+    return identity
+
+
 def output_result(ctx, data, human_formatter=None, include_project=True):
-    """Outputs data either as JSON or human-readable format based on context flag (PAC-1 A04, R16-P1-04, R17-P1-04, R21-P1-02)."""
+    """Outputs data either as JSON or human-readable format based on context flag (PAC-1 A04, R16-P1-04, R17-P1-04, R21-P1-02, R25-A01)."""
     is_json = ctx.obj.get("json", False) if ctx.obj else False
     if is_json:
-        # PAC-1 A04, R16-P1-04, R17-P1-04, R21-P1-02: Versioned finite JSON envelope
-        project_meta = None
-        if include_project:
-            try:
-                mgr = get_session_mgr()
-                project_meta = {
-                    "name": mgr.model.name if mgr.model else None,
-                    "active_file": mgr.active_file,
-                    "revision": getattr(mgr, "revision", 0),
-                }
-            except Exception:
-                project_meta = None
+        # PAC-1 A04, R16-P1-04, R17-P1-04, R21-P1-02, R25-A01: Versioned finite JSON envelope
+        project_meta = project_context(ctx) if include_project else None
         payload = {
             "protocol_version": "1",
             "status": "success",
@@ -198,18 +225,14 @@ def output_result(ctx, data, human_formatter=None, include_project=True):
         skin.success(str(data))
 
 def output_error(ctx, message, code=1, error_code=None, data=None):
-    """Outputs structured error either as JSON or human-readable format (PAC-1 A04, R17-P1-04, R18-P1-04)."""
+    """Outputs structured error either as JSON or human-readable format (PAC-1 A04, R17-P1-04, R18-P1-04, R25-A01)."""
     is_json = ctx.obj.get("json", False) if (ctx and ctx.obj) else False
     if is_json:
         payload = {
             "protocol_version": "1",
             "status": "error",
             "outcome": "error",
-            "project": {
-                "name": session_mgr.model.name if (session_mgr and session_mgr.model) else None,
-                "active_file": getattr(session_mgr, "active_file", None),
-                "revision": getattr(session_mgr, "revision", 0),
-            },
+            "project": project_context(ctx) if ctx else None,
             "data": data,
             "error": {
                 "code": error_code or "ERROR",
@@ -262,10 +285,25 @@ class JsonEnvelopeGroup(click.Group):
 
 @click.group(cls=JsonEnvelopeGroup, invoke_without_command=True)
 @click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
+@click.option("--project", "project_path", type=click.Path(file_okay=False), help="Workspace directory; state is .cli-anything/session.json.")
+@click.option("--session", "session_path", type=click.Path(dir_okay=False), help="Explicit authoritative session JSON file.")
 @click.pass_context
-def cli(ctx, json_mode):
+def cli(ctx, json_mode, project_path=None, session_path=None):
     """CLI-Anything: Agent-Native Command Line Interface for Sweet Home 3D."""
     ctx.ensure_object(dict)
+    inherited = ctx.parent is not None and "resolution" in (ctx.find_root().obj or {})
+    if inherited:
+        if project_path is not None or session_path is not None:
+            raise click.UsageError("Start a new invocation to change REPL authority", ctx)
+    else:
+        def_sess = getattr(_session_mgr, "session_path", None) or SESSION_FILE
+        try:
+            ctx.obj["resolution"] = resolve_invocation(
+                project_path, session_path, default_session=def_sess
+            )
+        except (ValueError, OSError) as exc:
+            raise click.UsageError(str(exc), ctx) from exc
+        ctx.obj["invocation_manager"] = _session_mgr if (project_path is None and session_path is None and _session_mgr is not None) else None
     ctx.obj["json"] = json_mode
     if ctx.invoked_subcommand is None:
         if json_mode:
@@ -1092,11 +1130,14 @@ def doctor_cmd(ctx):
         shapely_ok = False
 
     # Status-only doctor must NEVER instantiate SessionManager if it triggers recovery/reconciliation
-    mgr = _session_mgr
-    session_path = getattr(mgr, "session_path", None) if mgr else None
-
-    if not session_path:
-        session_path = getattr(sys.modules.get(__name__), "SESSION_FILE", None) or getattr(session_module, "SESSION_FILE", None) or os.path.expanduser("~/.cli_anything_sweethome3d_session.json")
+    root = ctx.find_root() if ctx else None
+    mgr = (root.obj or {}).get("invocation_manager") if root else _session_mgr
+    if root and "resolution" in (root.obj or {}):
+        session_path = root.obj["resolution"]["session_path"]
+    else:
+        session_path = getattr(mgr, "session_path", None) if mgr else None
+        if not session_path:
+            session_path = getattr(sys.modules.get(__name__), "SESSION_FILE", None) or getattr(session_module, "SESSION_FILE", None) or os.path.expanduser("~/.cli_anything_sweethome3d_session.json")
 
     journal_path = (session_path + ".pending") if session_path else None
     session_exists = os.path.exists(session_path) if session_path else False
@@ -1178,7 +1219,12 @@ def run_repl():
             import shlex
             args = shlex.split(cmd_line)
             try:
-                cli.main(args=args, standalone_mode=False)
+                parent = click.get_current_context(silent=True)
+                if parent:
+                    with cli.make_context("sweethome3d", args, parent=parent) as child:
+                        cli.invoke(child)
+                else:
+                    cli.main(args=args, standalone_mode=False)
             except click.ClickException as ce:
                 skin.error(str(ce))
             except SystemExit:

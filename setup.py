@@ -28,7 +28,11 @@ setup(
     install_requires=[
         "click>=8.0",
         "shapely>=2.0.0",
+        "lxml>=6.0.0",
     ],
+    package_data={
+        "cli_anything.sweethome3d": ["resources/*.dtd"],
+    },
     entry_points={
         "console_scripts": [
             "cli-anything-sweethome3d=cli_anything.sweethome3d.sweethome3d_cli:main",

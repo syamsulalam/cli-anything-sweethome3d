@@ -14,6 +14,14 @@ from cli_anything.sweethome3d.core.room import Room
 from cli_anything.sweethome3d.core.opening import Opening
 from cli_anything.sweethome3d.core.furniture import Furniture
 from cli_anything.sweethome3d.core.dimension import DimensionLine
+from cli_anything.sweethome3d.core.native_contract import (
+    decode_angle,
+    encode_angle,
+    checked_native_float,
+    rgb_to_native,
+    native_to_rgb,
+    assert_native_wire,
+)
 
 
 def strict_json_loads(text):
@@ -689,6 +697,11 @@ class HomeModel:
             return round(total_cm / 100.0, 2)
         except Exception:
             return self.total_wall_length_m
+
+    def build_room_face_topology(self):
+        """Calculates atomic straight wall edges and two-sided room face ownership (PAC-1 T01-T06, R25)."""
+        from cli_anything.sweethome3d.core.topology import build_room_face_topology
+        return build_room_face_topology(self)
 
     def node_walls(self, level_id=None):
         """Replaces collinear overlapping and intersecting walls with their noded physical atoms (PAC-1 T01-T04, T06).
@@ -1824,7 +1837,7 @@ class HomeModel:
             }
         }
 
-    def to_xml(self):
+    def to_xml(self, *, validate=False):
         """Generates valid Sweet Home 3D Home.xml string preserving extra nodes and attributes."""
         def _format_native_color(col_str):
             if not col_str:
@@ -2017,6 +2030,9 @@ class HomeModel:
                     room_elem.append(ET.fromstring(raw_child))
                 except Exception:
                     pass
+            # PAC-1 N02, N09, R25: Stable sort room children so properties precede points
+            room_rank = {"property": 0, "textStyle": 1, "texture": 2, "point": 3}
+            room_elem[:] = sorted(room_elem, key=lambda child: room_rank.get(child.tag, 99))
 
         # Dimensions (PAC-1 N02, R18-P1-02: elevationStart and elevationEnd)
         for dim in self.dimensions.values():
@@ -2056,11 +2072,16 @@ class HomeModel:
 
         rough_string = ET.tostring(root, "utf-8")
         reparsed = minidom.parseString(rough_string)
-        return reparsed.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
+        text = reparsed.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
+        if validate:
+            assert_native_wire(text)
+        return text
 
     @classmethod
-    def from_xml(cls, xml_text):
+    def from_xml(cls, xml_text, *, dialect="native-v7400", validate=False):
         """Parses Sweet Home 3D Home.xml into a HomeModel instance preserving unmodeled elements."""
+        if validate:
+            assert_native_wire(xml_text)
         root = ET.fromstring(xml_text)
         model = cls(
             name=root.attrib.get("name", "Imported Home"),
@@ -2114,13 +2135,7 @@ class HomeModel:
             arc_val = 0.0
             if raw_arc is not None:
                 try:
-                    f_arc = float(raw_arc)
-                    if abs(f_arc) > 2 * math.pi:
-                        # Legacy degree encoding
-                        arc_val = f_arc
-                    else:
-                        # Gate N03: Native 7.5 radians with inverted sign -> internal degrees
-                        arc_val = round(-math.degrees(f_arc), 4)
+                    arc_val = round(decode_angle(raw_arc, dialect=dialect, wall_arc=True), 4)
                 except ValueError:
                     arc_val = 0.0
 
@@ -2252,12 +2267,10 @@ class HomeModel:
             y_cm = float(elem.attrib["y"]) if "y" in elem.attrib else None
             angle_deg = None
             if "angle" in elem.attrib:
-                angle_raw = float(elem.attrib["angle"])
-                # PAC-1 N03, R16-P1-03: Full float precision preservation (no 1-decimal truncation)
-                if abs(angle_raw) > 2 * math.pi:
-                    angle_deg = round(angle_raw % 360.0, 6)
-                else:
-                    angle_deg = round(math.degrees(angle_raw) % 360.0, 6)
+                try:
+                    angle_deg = round(decode_angle(elem.attrib["angle"], dialect=dialect) % 360.0, 6)
+                except ValueError:
+                    angle_deg = None
             level_id = elem.attrib.get("level", "level1")
 
             # Native opening handling without 'wall' or with spatial coordinates
@@ -2315,12 +2328,10 @@ class HomeModel:
             extra_attribs = {k: v for k, v in elem.attrib.items() if k not in known_f_keys}
             extra_children = [ET.tostring(c, encoding="unicode") for c in elem]
 
-            angle_raw = float(elem.attrib.get("angle", 0.0))
-            # PAC-1 N03, R16-P1-03: Full float precision preservation (no 1-decimal truncation)
-            if abs(angle_raw) > 2 * math.pi:
-                angle_deg = round(angle_raw % 360.0, 6)
-            else:
-                angle_deg = round(math.degrees(angle_raw) % 360.0, 6)
+            try:
+                angle_deg = round(decode_angle(elem.attrib.get("angle", "0"), dialect=dialect) % 360.0, 6)
+            except ValueError:
+                angle_deg = 0.0
 
             model.add_furniture(
                 furniture_id=elem.attrib.get("id"),

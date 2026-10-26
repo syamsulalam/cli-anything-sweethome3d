@@ -3280,6 +3280,341 @@ def test_doctor_rejects_invalid_present_session_revision(tmp_path, monkeypatch, 
     assert session.read_text(encoding='utf-8') == raw
 
 
+# ==============================================================================
+# PAC-1 Round 25 Acceptance Oracles (Slices A, N, and T)
+# ==============================================================================
+
+def _invoke_cli(*args):
+    result = CliRunner().invoke(cli_module.cli, ["--json", *map(str, args)])
+    try:
+        payload = json.loads(result.output)
+    except ValueError:
+        pytest.fail(f"Expected JSON envelope; exit={result.exit_code}; output={result.output!r}")
+    return result, payload
+
+
+def test_a_two_explicit_sessions_do_not_leak(tmp_path):
+    """Gate A01, A04, S06: Two explicit sessions in one process retain isolated authorities."""
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    for path, name in [(a, "Alpha"), (b, "Beta")]:
+        result, payload = _invoke_cli("--session", path, "project", "new", "--name", name)
+        assert result.exit_code == 0, payload
+        assert payload["project"]["session_path"] == os.path.normcase(os.path.realpath(path))
+        assert payload["project"]["name"] == name
+        assert payload["project"]["authority_id"].startswith("path-sha256:")
+    for path, name in [(a, "Alpha"), (b, "Beta"), (a, "Alpha")]:
+        result, payload = _invoke_cli("--session", path, "project", "info")
+        assert result.exit_code == 0, payload
+        assert payload["project"]["name"] == name
+    assert json.loads(a.read_text())["model"]["name"] == "Alpha"
+    assert json.loads(b.read_text())["model"]["name"] == "Beta"
+
+
+def test_a_project_and_session_alias_same_authority(tmp_path):
+    """Gate A01, A04: --project DIR and --session DIR/.cli-anything/session.json resolve identical authority."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    result, first = _invoke_cli("--project", root, "project", "new", "--name", "Owned")
+    assert result.exit_code == 0, first
+    target = root / ".cli-anything" / "session.json"
+    result, second = _invoke_cli("--session", target, "project", "info")
+    assert result.exit_code == 0, second
+    assert first["project"]["authority_id"] == second["project"]["authority_id"]
+    assert second["project"]["name"] == "Owned"
+
+
+def test_a_selector_conflict_never_writes(tmp_path):
+    """Gate A01: Specifying both --project and --session fails fast before disk modification."""
+    result, payload = _invoke_cli("--project", tmp_path, "--session", tmp_path / "s.json", "project", "new")
+    assert result.exit_code == 2
+    assert payload["error"]["code"] == "INPUT_ERROR"
+    assert "Choose --project OR --session" in payload["error"]["message"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_selected_doctor_is_passive_and_discovery_is_project_free(tmp_path):
+    """Gate A04, A08, S06: Selected doctor diagnostics are passive and capability discovery is project-free."""
+    session = tmp_path / "corrupt.json"
+    session.write_text("{")
+    pending = Path(str(session) + ".pending")
+    pending.write_bytes(b"evidence")
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    result, payload = _invoke_cli("--session", session, "capability")
+    assert result.exit_code == 0 and payload["project"] is None, payload
+    result, payload = _invoke_cli("--session", session, "doctor")
+    assert result.exit_code == 0, payload
+    assert payload["data"]["healthy"] is False
+    assert payload["data"]["session_path"] == os.path.normcase(os.path.realpath(session))
+    assert payload["data"]["checks"]["pending_journal"] is True
+    assert before == {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+
+
+def test_a_selected_error_has_context(tmp_path):
+    """Gate A04: Selected session errors report structured project context."""
+    session = tmp_path / "selected.json"
+    result, payload = _invoke_cli("--session", session, "wall", "remove", "absent")
+    assert result.exit_code != 0, payload
+    assert payload["project"]["session_path"] == os.path.normcase(os.path.realpath(session))
+    assert payload["protocol_version"] == "1" and payload["status"] == "error"
+
+
+def test_a_explicit_session_subprocess_restart(tmp_path):
+    """Gate A01, S04: Explicit session restarts across fresh subprocesses retain authoritative context."""
+    child = '''import os, sys
+from cli_anything.sweethome3d import sweethome3d_cli as cm
+cm.cli.main(args=sys.argv[1:])
+'''
+    env = dict(os.environ, HOME=str(tmp_path / "home"), USERPROFILE=str(tmp_path / "home"),
+               PYTHONDONTWRITEBYTECODE="1")
+    (tmp_path / "home").mkdir()
+    session = tmp_path / "restart.json"
+    for command in [["project", "new", "--name", "Restarted"], ["project", "info"]]:
+        run = subprocess.run([sys.executable, "-c", child, "--json", "--session", str(session), *command],
+                             env=env, capture_output=True, text=True, timeout=30)
+        assert run.returncode == 0, run.stdout + run.stderr
+        payload = json.loads(run.stdout)
+        assert payload["project"]["name"] == "Restarted"
+        assert payload["project"]["session_path"] == os.path.normcase(os.path.realpath(session))
+
+
+def test_a_repl_child_context_inherits_selected_owner(tmp_path, monkeypatch):
+    """Gate A01, A07: REPL child commands inherit parent invocation authority context."""
+    import click
+    def scripted_repl():
+        parent = click.get_current_context()
+        for args in [["--json", "project", "new", "--name", "Bound"], ["--json", "project", "info"]]:
+            with cli_module.cli.make_context("sweethome3d", args, parent=parent) as child:
+                cli_module.cli.invoke(child)
+    monkeypatch.setattr(cli_module, "run_repl", scripted_repl)
+    path = tmp_path / "repl.json"
+    result = CliRunner().invoke(cli_module.cli, ["--session", str(path)])
+    assert result.exit_code == 0, result.output
+    text = result.output.strip()
+    decoder = json.JSONDecoder()
+    payloads = []
+    while text:
+        payload, end = decoder.raw_decode(text)
+        payloads.append(payload)
+        text = text[end:].lstrip()
+    assert len(payloads) == 2
+    assert all(p["project"]["name"] == "Bound" for p in payloads)
+    assert json.loads(path.read_text())["model"]["name"] == "Bound"
+
+
+@pytest.fixture
+def r25_grammar(tmp_path):
+    """Supplies full derived pinned grammar profile for native XML validation."""
+    import hashlib
+    from cli_anything.sweethome3d.core.native_contract import native_profile_path
+    with native_profile_path() as path:
+        raw = path.read_bytes()
+    file = tmp_path / "profile.dtd"
+    file.write_bytes(raw)
+    return file, hashlib.sha256(raw).hexdigest()
+
+
+def _valid_wire():
+    return '''<home version="7400" selectedLevel="L"><level id="L" name="Ground" elevation="0" floorThickness="12" height="280"/>
+<wall id="w" level="L" xStart="0" yStart="0" xEnd="300" yEnd="0" thickness="15"/>
+<room id="r" level="L" floorColor="00EAEAEA"><point x="0" y="0"/><point x="300" y="0"/><point x="0" y="300"/></room></home>'''
+
+
+def test_n_valid_offline_structure(r25_grammar):
+    """Gate N02: Offline derived DTD validates valid Home.xml structure."""
+    from cli_anything.sweethome3d.core.native_contract import validate_native_xml
+    path, digest = r25_grammar
+    result = validate_native_xml(_valid_wire(), dtd_path=path, dtd_sha256=digest)
+    assert result["valid"] is True and result["target_execution"] == "not_checked"
+
+
+@pytest.mark.parametrize("case", ["order", "missing", "duplicate", "dangling", "wrong_type", "wrong_join_type", "custom", "nonfinite", "version", "doctype"])
+def test_n_structure_refusals(case, r25_grammar):
+    """Gate N02, N03: Offline validator strictly rejects invalid ordering, types, joins, and DOCTYPE injection."""
+    from cli_anything.sweethome3d.core.native_contract import validate_native_xml
+    root = ET.fromstring(_valid_wire())
+    if case == "order":
+        first = root[0]
+        root.remove(first)
+        root.append(first)
+    elif case == "missing":
+        del root.find("wall").attrib["xStart"]
+    elif case == "duplicate":
+        root.find("room").set("id", "w")
+    elif case == "dangling":
+        root.find("wall").set("level", "missing")
+    elif case == "wrong_type":
+        root.find("wall").set("level", "r")
+    elif case == "wrong_join_type":
+        root.find("wall").set("wallAtStart", "L")
+    elif case == "custom":
+        root.find("room").set("area", "9")
+    elif case == "nonfinite":
+        root.find("wall").set("xStart", "NaN")
+    elif case == "version":
+        root.set("version", "7.5")
+    text = ET.tostring(root, encoding="unicode")
+    if case == "doctype":
+        text = '<!DOCTYPE home SYSTEM "file:///must-not-read">' + text
+    path, digest = r25_grammar
+    with pytest.raises(ValueError):
+        validate_native_xml(text, dtd_path=path, dtd_sha256=digest)
+
+
+def test_n_grammar_hash_is_bound(r25_grammar):
+    """Gate N02: Grammar modification triggers immediate hash mismatch refusal."""
+    from cli_anything.sweethome3d.core.native_contract import validate_native_xml
+    path, digest = r25_grammar
+    path.write_bytes(path.read_bytes() + b"\n")
+    with pytest.raises(ValueError, match="hash"):
+        validate_native_xml(_valid_wire(), dtd_path=path, dtd_sha256=digest)
+
+
+def test_n_preserved_room_property_precedes_points(r25_grammar):
+    """Gate N02, N09: Preserved room properties must precede points in native DTD child sequence."""
+    from cli_anything.sweethome3d.core.native_contract import validate_native_xml
+    root = ET.fromstring(_valid_wire())
+    room = root.find("room")
+    property_element = ET.Element("property", name="must_survive", value="native")
+    room.insert(0, property_element)
+    path, digest = r25_grammar
+    assert validate_native_xml(ET.tostring(root), dtd_path=path, dtd_sha256=digest)["valid"]
+    room.remove(property_element)
+    room.append(property_element)
+    with pytest.raises(ValueError):
+        validate_native_xml(ET.tostring(root), dtd_path=path, dtd_sha256=digest)
+
+
+def test_n_explicit_units_colors_and_float():
+    """Gate N03: Explicit unit dialects, 00RRGGBB colors, and IEEE-754 float bounds."""
+    from cli_anything.sweethome3d.core.native_contract import (
+        decode_angle, encode_angle, rgb_to_native, native_to_rgb, checked_native_float
+    )
+    assert decode_angle("7", dialect="native-v7400") == pytest.approx(math.degrees(7))
+    assert decode_angle("1", dialect="cli-legacy-degrees-v1") == 1
+    assert decode_angle(str(-math.pi / 2), dialect="native-v7400", wall_arc=True) == pytest.approx(90)
+    assert encode_angle(90, wall_arc=True) == pytest.approx(-math.pi / 2)
+    assert rgb_to_native("#eaeaea") == "00EAEAEA"
+    assert native_to_rgb("00EAEAEA") == "#EAEAEA"
+    assert abs(checked_native_float(99999.99, coordinate=True) - 99999.99) <= .01
+    for value in [float("nan"), float("inf"), True]:
+        with pytest.raises(ValueError):
+            checked_native_float(value)
+    with pytest.raises(ValueError):
+        decode_angle(90, dialect="guess")
+    with pytest.raises(ValueError):
+        checked_native_float(100001, coordinate=True)
+    with pytest.raises(ValueError):
+        native_to_rgb("FFEAEAEA")
+
+
+def _adjacent_rooms(reverse=False):
+    m = HomeModel()
+    a = [(0, 0), (300, 0), (300, 300), (0, 300)]
+    b = [(300, 0), (600, 0), (600, 300), (300, 300)]
+    m.add_room("A", "A", a[::-1] if reverse else a, with_walls=True)
+    m.add_room("B", "B", b[::-1] if reverse else b, with_walls=True)
+    return m
+
+
+def test_t_adjacent_room_dual_ownership():
+    """Gate T01-T04: Adjacent 3x3m rooms yield 7 physical edges / 21m and dual room ownership on shared edge."""
+    topo = _adjacent_rooms().build_room_face_topology()
+    edges = topo["edges"]
+    assert len(edges) == 7
+    assert sum(e["length_cm"] for e in edges) == pytest.approx(2100)
+    shared = [e for e in edges if all(f["room_id"] is not None for f in e["faces"].values())]
+    assert len(shared) == 1
+    assert shared[0]["start"] == [300.0, 0.0] and shared[0]["end"] == [300.0, 300.0]
+    assert shared[0]["faces"]["positive"]["room_id"] == "A"
+    assert shared[0]["faces"]["negative"]["room_id"] == "B"
+    assert len(topo["room_boundaries"]["A"]) == len(topo["room_boundaries"]["B"]) == 4
+
+
+def test_t_reversed_rings_and_source_station_signs():
+    """Gate T01, T05: Reversed room boundary rings preserve physical face ownership and sign source stations."""
+    normal = _adjacent_rooms().build_room_face_topology()
+    reverse = _adjacent_rooms(True).build_room_face_topology()
+    def signature(t):
+        return [(e["start"], e["end"], {s: f["room_id"] for s, f in e["faces"].items()}) for e in t["edges"]]
+    assert signature(normal) == signature(reverse)
+    assert any(s["s_end_cm"] < s["s_start_cm"] for e in reverse["edges"] for s in e["sources"])
+
+
+def test_t_reference_roundtrip_and_removal_have_no_stale_owner():
+    """Gate T01, T06: Room face topology survives serialization roundtrip and removal clears ownership."""
+    m = _adjacent_rooms()
+    expected = m.build_room_face_topology()
+    assert HomeModel.from_dict(m.to_dict()).build_room_face_topology() == expected
+    m.remove_room("B")
+    assert all(f["room_id"] != "B" for e in m.build_room_face_topology()["edges"] for f in e["faces"].values())
+
+
+def test_t_same_side_conflict_is_pure_and_atomic():
+    """Gate T01: Competing same-side room ownership fails atomically without model mutation."""
+    m = _adjacent_rooms()
+    m.add_room("duplicate", "duplicate", list(m.rooms["A"].points))
+    before = m.to_dict()
+    with pytest.raises(ValueError, match="OWNERSHIP_CONFLICT"):
+        m.build_room_face_topology()
+    assert m.to_dict() == before
+
+
+def test_t_partial_room_boundary_splits_physical_edge():
+    """Gate T01-T04: Partial room boundary splits long wall into differently owned atoms."""
+    m = HomeModel()
+    m.add_wall("long", 0, 0, 600, 0)
+    m.add_room("A", "A", [(0, 0), (300, 0), (300, 300), (0, 300)])
+    topo = m.build_room_face_topology()
+    assert len(topo["edges"]) == 2
+    owned = [e for e in topo["edges"] if any(f["room_id"] == "A" for f in e["faces"].values())]
+    assert len(owned) == 1 and owned[0]["length_cm"] == pytest.approx(300)
+    assert sum(e["length_cm"] for e in topo["edges"]) == pytest.approx(600)
+
+
+def test_t_curves_are_not_silently_certified_as_straight():
+    """Gate T01: Curved walls explicitly refuse straight face topology."""
+    m = HomeModel()
+    m.add_wall("arc", 0, 0, 400, 0, arc_extent=90)
+    with pytest.raises(ValueError, match="UNSUPPORTED_CURVED_FACE_TOPOLOGY"):
+        m.build_room_face_topology()
+
+
+def test_t_partial_overlap_keeps_signed_all_source_provenance():
+    """Gate T01, T05: Partial wall overlap preserves signed station provenance for all covering walls."""
+    m = HomeModel()
+    m.add_wall("a", 0, 0, 300, 0)
+    m.add_wall("b", 450, 0, 150, 0)
+    topo = m.build_room_face_topology()
+    assert len(topo["edges"]) == 3
+    assert sum(e["length_cm"] for e in topo["edges"]) == pytest.approx(450)
+    middle = next(e for e in topo["edges"] if e["start"] == [150.0, 0.0])
+    assert {s["wall_id"]: (s["s_start_cm"], s["s_end_cm"]) for s in middle["sources"]} == {
+        "a": (150.0, 300.0), "b": (300.0, 150.0)}
+
+
+def test_t_level_ownership_does_not_leak():
+    """Gate T01, T03: Room face ownership is isolated per level."""
+    m = _adjacent_rooms()
+    m.add_level("upper", "Upper", elevation_cm=300)
+    m.add_room("U", "U", [(0, 0), (300, 0), (300, 300), (0, 300)], level_id="upper", with_walls=True)
+    edges = m.build_room_face_topology()["edges"]
+    assert len(edges) == 11 and sum(e["length_cm"] for e in edges) == pytest.approx(3300)
+    assert all(f["room_id"] in (None, "U") for e in edges if e["level_id"] == "upper" for f in e["faces"].values())
+
+
+def test_t_hole_ring_owns_material_side_not_void_side():
+    """Gate T01, T04: Room hole boundaries own the material interior side, not the void side."""
+    m = HomeModel()
+    room = m.add_room("A", "A", [(0, 0), (300, 0), (300, 300), (0, 300)])
+    room.holes = [[(100, 100), (200, 100), (200, 200), (100, 200)]]
+    m.add_wall_loop(room.holes[0], prefix="void")
+    edges = m.build_room_face_topology()["edges"]
+    edge = next(e for e in edges if e["start"] == [100.0, 100.0] and e["end"] == [200.0, 100.0])
+    assert edge["faces"]["negative"]["room_id"] == "A"
+    assert edge["faces"]["positive"]["room_id"] is None
+
+
+
 
 
 
