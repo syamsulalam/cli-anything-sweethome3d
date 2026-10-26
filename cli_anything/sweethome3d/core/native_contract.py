@@ -276,21 +276,34 @@ def compute_curved_wall_error_budget(wall, steps=None) -> dict[str, float]:
     cx = mx - sign * h * nx
     cy = my - sign * h * ny
 
-    # Float32 representation error
-    f32_cx = checked_native_float(cx, coordinate=True)
-    f32_cy = checked_native_float(cy, coordinate=True)
-    f32_r = checked_native_float(R)
-    f32_theta = checked_native_float(theta_rad)
+    # PAC-1 N03 / R29: Continuous wire-based curve error budget assessment
+    # Wire coordinates check (endpoints and sweep angle)
+    checked_native_float(wall.x_start, coordinate=True)
+    checked_native_float(wall.y_start, coordinate=True)
+    checked_native_float(wall.x_end, coordinate=True)
+    checked_native_float(wall.y_end, coordinate=True)
+    f32_theta_rad = checked_native_float(theta_rad)
 
-    e_center = math.hypot(f32_cx - cx, f32_cy - cy)
-    e_radius = abs(f32_r - R)
-    e_angle = abs(f32_theta - theta_rad)
+    # Reconstruct circle from float32 encoded sweep (continuous path bound)
+    sin_half_f32 = math.sin(f32_theta_rad / 2.0)
+    R_prime = c / (2.0 * sin_half_f32) if abs(sin_half_f32) > 1e-6 else R
+    h_prime = R_prime * math.cos(f32_theta_rad / 2.0)
+    cx_prime = mx - sign * h_prime * nx
+    cy_prime = my - sign * h_prime * ny
+    phi0 = math.atan2(wall.y_start - cy, wall.x_start - cx)
+    phi0_prime = math.atan2(wall.y_start - cy_prime, wall.x_start - cx_prime)
+
+    e_center = math.hypot(cx_prime - cx, cy_prime - cy)
+    e_radius = abs(R_prime - R)
+    e_phi0 = abs((phi0 - phi0_prime + math.pi) % (2.0 * math.pi) - math.pi)
+    e_angle = abs(f32_theta_rad - theta_rad)
+    e_native = e_center + e_radius + R_prime * (e_phi0 + e_angle)
 
     sampling_steps = steps or (wall.get_curve_sampling_steps(error_tol=0.008) if hasattr(wall, "get_curve_sampling_steps") else 32)
     d_theta = theta_rad / max(1, sampling_steps)
     e_rep = R * (1.0 - math.cos(d_theta / 2.0))
 
-    total = e_center + e_radius + (R * e_angle) + e_rep
+    total = e_native + e_rep
     return {
         "center_error": e_center,
         "radius_error": e_radius,

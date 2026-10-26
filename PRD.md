@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.19.0 (PAC-1 Contract Iteration 28)  
+**Document Version:** 2.20.0 (PAC-1 Contract Iteration 29)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -378,3 +378,27 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
   - Merged all 22 oracles into `tests/test_core.py`, bringing repository suite to **265 passed in 18.75s** (100% green).
   - All 4 built-in architectural templates validate clean.
   - Clean Open Code Review via `ocr delegate` (0 blockers, 0 warnings, 0 regressions). (`✅ Completed`)
+
+
+### Phase 24: PAC-1 Round 29 Scoped Boundary Invariant Repairs (Iteration 29)
+- [x] **R28-P1-01 (Wall Edit Whole-Owner Invariants, Gates T06, A02)**:
+  - In `core/project.py`, `reverse_wall` implements atomic rollback restoring live objects on failure, unconditionally freezes all 3 resolved pose fields (`x_cm, y_cm, angle_deg`) from old geometry, swaps native XML child attribute roles (`leftSideTexture` ↔ `rightSideTexture`, `leftSideBaseboard` ↔ `rightSideBaseboard`), and normalizes sloped wall heights.
+  - In `split_wall`, interpolates sloped wall height ($h_a = h_0 + (h_1 - h_0) \times a / L$) across first and tail segments, establishes reciprocal internal joins (`first.wallAtEnd = tail`, `tail.wallAtStart = first`), retargets end neighbors, and enforces atomic rollback on direct API failure. (`✅ Completed`)
+- [x] **R28-P1-02 (Coincident Arc Overlap Stations & Multiway Incidence, Gates T02, T03, T05)**:
+  - In `core/topology.py`, `compute_wall_analytic_stations` detects concentric/coincident arcs ($d < 1e-4, |r_1 - r_2| < 1e-4$), calculates angular interval stations along both arc walls, and merges multiway node peer relations into `peer_ids` without dropping third peers. (`✅ Completed`)
+- [x] **R28-P1-03 (Continuous Wire-Based Curve Error Budget & Unified Codec Admission, Gate N03)**:
+  - In `core/native_contract.py`, `compute_curved_wall_error_budget` assesses continuous path error bounds from float32 encoded wire fields without imposing unencoded circle-center bounds checks, safely supporting small sweep angles (e.g. 300cm chord, 0.1° arc).
+  - Enforces `assert_native_model_domain` in both `from_xml` and `to_xml`, guaranteeing 100% agreement between input admission and output publication. (`✅ Completed`)
+- [x] **R28-P1-04 (Shared Canonical Archive Inventory Between Load and Save, Gate N08)**:
+  - In `core/project.py`, implements `validate_resource_name` rejecting drive prefixes, backslashes, leading slashes, and dot/empty components (`.`, `..`, `""`).
+  - Pre-validates all `extra_zip_entries` in `save_sh3d` before creating or modifying target archives, preventing publication of loader-rejected names. (`✅ Completed`)
+- [x] **R28-P1-05 (Complete Protocol Integration Across CLI Handlers, Gate A04)**:
+  - In `sweethome3d_cli.py`, `classify_error` prioritizes `UNSUPPORTED` (exit 5) over generic `ValueError` (exit 3) and maps `PermissionError`/`OSError` to `IO_ERROR` (exit 6).
+  - Replaces stringified error output (`output_error(ctx, str(e))`) with object-preserving routing (`output_error(ctx, e)`) across all command handlers.
+  - Adds outer exception boundary in `JsonEnvelopeGroup.invoke` and `main` emitting versioned machine-readable JSON error envelopes on constructor/session errors. (`✅ Completed`)
+- [x] **Test Reconciliation & Oracle Integration**:
+  - All 16 Round 29 repair oracles pass 100% green (`2026-10-27_SweetHome3D_CLI_Round29_Repair_Oracles.py`).
+  - All 22 Round 28 acceptance oracles pass 100% green.
+  - Full repository test suite expanded to **281 passed in 10.13s** (100% green).
+  - All 4 built-in architectural templates validate clean.
+  - Clean Open Code Review via `ocr delegate` across 4 production files (0 blockers, 0 warnings, 0 regressions). (`✅ Completed`)

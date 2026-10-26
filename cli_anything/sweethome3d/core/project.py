@@ -405,9 +405,24 @@ MAX_ZIP_UNCOMPRESSED_SIZE = 100 * 1024 * 1024  # 100 MiB
 MAX_ZIP_SINGLE_ENTRY_SIZE = 25 * 1024 * 1024   # 25 MiB
 
 
+def validate_resource_name(name: str) -> str:
+    """Validates entry name against path traversal, drive prefixes, empty or dot components (PAC-1 N08)."""
+    import ntpath
+    drive, _ = ntpath.splitdrive(name)
+    if drive:
+        raise ValueError(f"Drive-prefixed path in ZIP entry: {name}")
+    if "\\" in name:
+        raise ValueError(f"Backslash in ZIP entry name: {name}")
+    if name.startswith("/"):
+        raise ValueError(f"Absolute path in ZIP entry: {name}")
+    parts = name.split("/")
+    if any(p in (".", "..", "") for p in parts):
+        raise ValueError(f"Dangerous path traversal, dot or empty component in ZIP entry: {name}")
+    return name
+
+
 def validate_sh3d_zip_archive(zf):
     """Bounded ZIP archive policies (PAC-1 N08): entry limits, max size, traversal protection, duplicate prevention."""
-    import ntpath
     infolist = zf.infolist()
     if len(infolist) > MAX_ZIP_ENTRIES:
         raise ValueError(f"ZIP archive exceeds max entry limit: {len(infolist)} > {MAX_ZIP_ENTRIES}")
@@ -416,16 +431,10 @@ def validate_sh3d_zip_archive(zf):
     total_uncompressed = 0
     for info in infolist:
         name = info.filename
-        drive, rest = ntpath.splitdrive(name)
-        if drive:
-            raise ValueError(f"Drive-prefixed path in ZIP entry: {name}")
-        norm = name.replace("\\", "/")
-        if norm.startswith("/") or ".." in norm.split("/"):
-            raise ValueError(f"Dangerous path traversal in ZIP archive entry: {name}")
-        if norm in seen_names or name in seen_names:
+        validate_resource_name(name)
+        if name in seen_names:
             raise ValueError(f"Duplicate entry in ZIP archive: {name}")
         seen_names.add(name)
-        seen_names.add(norm)
         if name == "Home.xml":
             home_xml_count += 1
         if info.file_size > MAX_ZIP_SINGLE_ENTRY_SIZE:
@@ -568,59 +577,105 @@ class HomeModel:
         wall = self.walls[wall_id]
         total_len = wall.length
 
-        # Pre-resolve door physical poses before changing coordinates
-        door_poses = {}
-        for op in self.openings.values():
-            if op.wall_id == wall_id:
-                door_poses[op.id] = op.get_effective_geometry(wall)
+        # Atomic rollback snapshots
+        wall_snapshot = dict(wall.__dict__)
+        wall_attribs_snapshot = dict(wall.extra_attribs)
+        wall_children_snapshot = list(wall.extra_children)
+        openings_snapshot = {
+            op.id: dict(op.__dict__)
+            for op in self.openings.values()
+            if op.wall_id == wall_id
+        }
 
-        # Invert coordinates
-        wall.x_start, wall.x_end = wall.x_end, wall.x_start
-        wall.y_start, wall.y_end = wall.y_end, wall.y_start
-        if wall.arc_extent != 0.0:
-            wall.arc_extent = -wall.arc_extent
+        try:
+            # Pre-validate sloped height if present before changing object state
+            if "heightAtEnd" in wall.extra_attribs:
+                old_h = wall.height
+                old_h_end = float(wall.extra_attribs["heightAtEnd"])
+                wall.height = old_h_end
+                wall.extra_attribs["heightAtEnd"] = str(round(old_h, 4))
 
-        # Re-anchor hosted openings preserving physical world geometry
-        for op in self.openings.values():
-            if op.wall_id == wall_id:
-                new_offset = total_len - op.offset_cm - op.width_cm
-                op.offset_cm = max(0.0, round(new_offset, 4))
-                # Pin absolute pose if not already explicit so physical hinge and open endpoint are preserved
-                if op.x_cm is None and op.id in door_poses and door_poses[op.id]:
-                    p = door_poses[op.id]
-                    op.x_cm = p["center"][0]
-                    op.y_cm = p["center"][1]
-                    op.angle_deg = p["angle_deg"]
-                # Keep op.swing unchanged; absolute pose preserves hinge and sweep
+            # Pre-resolve door physical poses before changing coordinates
+            door_poses = {}
+            for op in self.openings.values():
+                if op.wall_id == wall_id:
+                    door_poses[op.id] = op.get_effective_geometry(wall)
 
-        # Normalize physical face intent (swap left and right finishes)
-        side_pairs = [
-            ("leftSideColor", "rightSideColor"),
-            ("leftSideTexture", "rightSideTexture"),
-            ("leftSideShininess", "rightSideShininess"),
-            ("leftSideBaseboard", "rightSideBaseboard"),
-            ("wallAtStart", "wallAtEnd"),
-        ]
-        for k1, k2 in side_pairs:
-            v1 = wall.extra_attribs.get(k1)
-            v2 = wall.extra_attribs.get(k2)
-            if v1 is not None or v2 is not None:
-                if v2 is not None:
-                    wall.extra_attribs[k1] = v2
-                else:
-                    wall.extra_attribs.pop(k1, None)
-                if v1 is not None:
-                    wall.extra_attribs[k2] = v1
-                else:
-                    wall.extra_attribs.pop(k2, None)
+            # Invert coordinates
+            wall.x_start, wall.x_end = wall.x_end, wall.x_start
+            wall.y_start, wall.y_end = wall.y_end, wall.y_start
+            if wall.arc_extent != 0.0:
+                wall.arc_extent = -wall.arc_extent
 
-        if "heightAtEnd" in wall.extra_attribs:
-            old_h = wall.height
-            old_h_end = float(wall.extra_attribs["heightAtEnd"])
-            wall.height = old_h_end
-            wall.extra_attribs["heightAtEnd"] = str(old_h)
+            # Re-anchor hosted openings preserving physical world geometry
+            for op in self.openings.values():
+                if op.wall_id == wall_id:
+                    new_offset = total_len - op.offset_cm - op.width_cm
+                    op.offset_cm = max(0.0, round(new_offset, 4))
+                    # Pin all 3 resolved pose fields (center and physical angle) unconditionally
+                    if op.id in door_poses and door_poses[op.id]:
+                        p = door_poses[op.id]
+                        op.x_cm = p["center"][0]
+                        op.y_cm = p["center"][1]
+                        op.angle_deg = p["angle_deg"]
+                    # Keep op.swing unchanged; absolute pose preserves hinge and sweep
 
-        return wall
+            # Normalize physical face intent (swap left and right finishes)
+            side_pairs = [
+                ("leftSideColor", "rightSideColor"),
+                ("leftSideTexture", "rightSideTexture"),
+                ("leftSideShininess", "rightSideShininess"),
+                ("leftSideBaseboard", "rightSideBaseboard"),
+                ("wallAtStart", "wallAtEnd"),
+            ]
+            for k1, k2 in side_pairs:
+                v1 = wall.extra_attribs.get(k1)
+                v2 = wall.extra_attribs.get(k2)
+                if v1 is not None or v2 is not None:
+                    if v2 is not None:
+                        wall.extra_attribs[k1] = v2
+                    else:
+                        wall.extra_attribs.pop(k1, None)
+                    if v1 is not None:
+                        wall.extra_attribs[k2] = v1
+                    else:
+                        wall.extra_attribs.pop(k2, None)
+
+            # Normalize native XML child attribute roles (texture and baseboard)
+            new_children = []
+            for ch in wall.extra_children:
+                try:
+                    elem = ET.fromstring(ch)
+                    attr = elem.get("attribute")
+                    ROLE_SWAP = {
+                        "leftSideTexture": "rightSideTexture",
+                        "rightSideTexture": "leftSideTexture",
+                        "leftSideBaseboard": "rightSideBaseboard",
+                        "rightSideBaseboard": "leftSideBaseboard",
+                        "leftSideColor": "rightSideColor",
+                        "rightSideColor": "leftSideColor",
+                        "leftSideShininess": "rightSideShininess",
+                        "rightSideShininess": "leftSideShininess",
+                    }
+                    if attr in ROLE_SWAP:
+                        elem.set("attribute", ROLE_SWAP[attr])
+                        new_children.append(ET.tostring(elem, encoding="unicode"))
+                    else:
+                        new_children.append(ch)
+                except Exception:
+                    new_children.append(ch)
+            wall.extra_children = new_children
+
+            return wall
+        except Exception:
+            # Atomic rollback on failure
+            wall.__dict__.update(wall_snapshot)
+            wall.extra_attribs = wall_attribs_snapshot
+            wall.extra_children = wall_children_snapshot
+            for op_id, op_snap in openings_snapshot.items():
+                if op_id in self.openings:
+                    self.openings[op_id].__dict__.update(op_snap)
+            raise
 
     def split_wall(self, wall_id, split_offset_cm, new_wall_id=None):
         """Splits a wall into two contiguous collinear segments at split_offset_cm (PAC-1 T06).
@@ -681,12 +736,24 @@ class HomeModel:
         wall.x_end = split_pt[0]
         wall.y_end = split_pt[1]
 
+        # Sloped wall height interpolation
+        old_h0 = wall.height
+        old_h1_str = wall.extra_attribs.get("heightAtEnd")
+        if old_h1_str is not None:
+            old_h1 = float(old_h1_str)
+            ha = old_h0 + (old_h1 - old_h0) * (split_s / total_len)
+            wall.height = old_h0
+            wall.extra_attribs["heightAtEnd"] = str(round(ha, 4))
+            wall2.height = ha
+            wall2.extra_attribs["heightAtEnd"] = str(round(old_h1, 4))
+
         # Retarget native endpoint joins:
-        # wall2 inherits wallAtEnd because it ends where original wall ended
+        # wall2 inherits old wallAtEnd, and internal reciprocal joins connect wall <-> wall2
         old_end_join = wall.extra_attribs.pop("wallAtEnd", None)
         if old_end_join is not None:
             wall2.extra_attribs["wallAtEnd"] = old_end_join
-        wall.extra_attribs.pop("wallAtEnd", None)
+        wall.extra_attribs["wallAtEnd"] = new_id
+        wall2.extra_attribs["wallAtStart"] = wall_id
 
         # Retarget any neighboring wall pointing to wall_id at the old end
         for other in self.walls.values():
@@ -2550,10 +2617,19 @@ class HomeModel:
                 extra_children=extra_children,
             )
 
+        if validate:
+            assert_native_model_domain(model)
+
         return model
 
     def save_sh3d(self, filepath):
         """Saves project as a native .sh3d compressed ZIP archive atomically preserving all resources."""
+        # PAC-1 N08: Pre-validate all extra zip entries before creating or modifying target
+        for fname, data_bytes in self.extra_zip_entries.items():
+            if fname not in ("Home.xml", "Home"):
+                validate_resource_name(fname)
+                if len(data_bytes) > MAX_ZIP_SINGLE_ENTRY_SIZE:
+                    raise ValueError(f"ZIP entry exceeds single-file size limit: {fname}")
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
         tmp_target = filepath + ".tmp"
         xml_content = self.to_xml()

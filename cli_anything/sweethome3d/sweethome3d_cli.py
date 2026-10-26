@@ -228,6 +228,13 @@ def output_result(ctx, data, human_formatter=None, include_project=True):
 
 def classify_error(exc_or_msg):
     """Maps errors to PAC-1 typed exit codes and machine-readable error codes (PAC-1 A04, R28-P1-05)."""
+    msg = str(exc_or_msg)
+    msg_lower = msg.lower()
+
+    # Unsupported capability or format takes precedence over generic ValueError
+    if "unsupported" in msg_lower or isinstance(exc_or_msg, NotImplementedError):
+        return 5, "UNSUPPORTED"
+
     if isinstance(exc_or_msg, BaseException):
         chain, seen = [], set()
         curr = exc_or_msg
@@ -244,16 +251,13 @@ def classify_error(exc_or_msg):
             if any(isinstance(item, typ) for item in chain):
                 return result
 
-    msg = str(exc_or_msg)
-    if "unresolved recovery journal" in msg or "RECOVERY_REQUIRED" in msg:
+    if "unresolved recovery journal" in msg or "RECOVERY_REQUIRED" in msg or "recovery" in msg_lower:
         return 7, "RECOVERY_REQUIRED"
-    if "conflict" in msg.lower() or "CONFLICT" in msg or "Duplicate" in msg or "already exists" in msg:
+    if "conflict" in msg_lower or "CONFLICT" in msg or "duplicate" in msg_lower or "already exists" in msg_lower:
         return 4, "CONFLICT"
-    if "access denied" in msg.lower() or "not found" in msg.lower() or "No such file" in msg or "IO_ERROR" in msg:
+    if "access denied" in msg_lower or "permission denied" in msg_lower or "not found" in msg_lower or "no such file" in msg_lower or "io_error" in msg_lower:
         return 6, "IO_ERROR"
-    if "unsupported" in msg.lower() or "UNSUPPORTED" in msg:
-        return 5, "UNSUPPORTED"
-    if "validation" in msg.lower() or "invalid" in msg.lower() or "zero" in msg.lower() or "finite" in msg.lower():
+    if "validation" in msg_lower or "invalid" in msg_lower or "zero" in msg_lower or "finite" in msg_lower or "corrupt" in msg_lower:
         return 3, "VALIDATION_REJECTED"
     return 1, "ERROR"
 
@@ -262,13 +266,22 @@ def output_error(ctx, message, code=1, error_code=None, data=None):
     if code == 1 and error_code is None:
         code, error_code = classify_error(message)
     msg_str = str(message)
-    is_json = ctx.obj.get("json", False) if (ctx and ctx.obj) else False
+    is_json = False
+    if ctx and hasattr(ctx, "obj") and isinstance(ctx.obj, dict):
+        is_json = ctx.obj.get("json", False)
+    if not is_json and "--json" in sys.argv:
+        is_json = True
     if is_json:
+        proj_meta = None
+        try:
+            proj_meta = project_context(ctx) if ctx else None
+        except Exception:
+            proj_meta = None
         payload = {
             "protocol_version": "1",
             "status": "error",
             "outcome": "error",
-            "project": project_context(ctx) if ctx else None,
+            "project": proj_meta,
             "data": data,
             "error": {
                 "code": error_code or "ERROR",
@@ -288,6 +301,16 @@ def output_error(ctx, message, code=1, error_code=None, data=None):
 
 class JsonEnvelopeGroup(click.Group):
     """Custom Click Group that captures usage and Click exceptions under --json mode and emits versioned JSON error envelope (PAC-1 A04, R18-P1-04)."""
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except click.ClickException:
+            raise
+        except click.exceptions.Exit:
+            raise
+        except Exception as exc:
+            output_error(ctx, exc)
+
     def main(self, args=None, prog_name=None, complete_var=None, standalone_mode=True, **extra):
         raw_args = list(sys.argv[1:] if args is None else args)
         is_json = "--json" in raw_args
@@ -317,6 +340,24 @@ class JsonEnvelopeGroup(click.Group):
         except click.exceptions.Exit as e:
             if standalone_mode:
                 sys.exit(e.exit_code)
+            raise
+        except Exception as e:
+            if is_json:
+                code, err_code = classify_error(e)
+                payload = {
+                    "protocol_version": "1",
+                    "status": "error",
+                    "outcome": "error",
+                    "project": None,
+                    "data": None,
+                    "error": {
+                        "code": err_code,
+                        "message": str(e),
+                    },
+                    "message": str(e),
+                }
+                click.echo(json.dumps(payload, indent=2, allow_nan=False))
+                sys.exit(code)
             raise
 
 @click.group(cls=JsonEnvelopeGroup, invoke_without_command=True)
@@ -460,7 +501,7 @@ def project_template(ctx, template_type, name):
             apply_template(session_mgr.model, template_type, name=name)
             session_mgr.save_session()
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
     data = {
         "status": "success",
         "template": template_type,
@@ -530,7 +571,7 @@ def wall_add(ctx, wall_id, x1, y1, x2, y2, thickness, height, level_id, arc_exte
             session_mgr.save_session()
         output_result(ctx, w.to_dict())
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 @wall.command(name="add-loop")
 @click.option("--prefix", "--id-prefix", "id_prefix", default="w_", help="Prefix for generated wall IDs (e.g. 'w_').")
@@ -560,7 +601,7 @@ def wall_add_loop(ctx, id_prefix, points, closed, thickness, height, level_id):
         data = [w.to_dict() for w in created]
         output_result(ctx, {"created_count": len(created), "created_walls": data, "walls": data})
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 @wall.command(name="list")
 @click.option("--level", "level_id", default=None, help="Filter by level ID.")
@@ -595,7 +636,7 @@ def wall_remove(ctx, wall_id):
             session_mgr.save_session()
         output_result(ctx, {"removed": wall_id})
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 @wall.command(name="reverse")
 @click.argument("wall_id")
@@ -646,7 +687,7 @@ def wall_node(ctx, level_id):
             "level": level_id or "all"
         })
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 # ==============================================================================
 # 3. Room Commands
@@ -690,7 +731,7 @@ def room_add(ctx, room_id, name, points, color, level_id, with_walls, wall_thick
         res["with_walls"] = with_walls
         output_result(ctx, res)
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 @room.command(name="list")
 @click.option("--level", "level_id", default=None, help="Filter by level ID.")
@@ -725,7 +766,7 @@ def room_remove(ctx, room_id):
             session_mgr.save_session()
         output_result(ctx, {"removed": room_id})
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 @room.command(name="area")
 @click.argument("room_id")
@@ -764,7 +805,7 @@ def opening_add(ctx, opening_id, name, wall_id, offset, width, height, opening_t
             session_mgr.save_session()
         output_result(ctx, op.to_dict())
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 @opening.command(name="list")
 @click.pass_context
@@ -794,7 +835,7 @@ def opening_remove(ctx, opening_id):
             session_mgr.save_session()
         output_result(ctx, {"removed": opening_id})
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 # ==============================================================================
 # 5. Furniture Commands
@@ -849,7 +890,7 @@ def furniture_add(ctx, furniture_id, name, catalog_id, x, y, elevation, width, d
             session_mgr.save_session()
         output_result(ctx, f.to_dict())
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 @furniture.command(name="list")
 @click.option("--level", "level_id", default=None, help="Filter by level ID.")
@@ -884,7 +925,7 @@ def furniture_remove(ctx, furniture_id):
             session_mgr.save_session()
         output_result(ctx, {"removed": furniture_id})
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 # ==============================================================================
 # 6. Dimension Line Commands
@@ -913,7 +954,7 @@ def dimension_add(ctx, dimension_id, x1, y1, x2, y2, offset, level_id):
             session_mgr.save_session()
         output_result(ctx, dim.to_dict())
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 @dimension.command(name="list")
 @click.option("--level", "level_id", default=None, help="Filter by level ID.")
@@ -948,7 +989,7 @@ def dimension_remove(ctx, dimension_id):
             session_mgr.save_session()
         output_result(ctx, {"removed": dimension_id})
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 # ==============================================================================
 # 7. Level Commands
@@ -973,7 +1014,7 @@ def level_add(ctx, level_id, name, elevation, height):
             session_mgr.save_session()
         output_result(ctx, lvl.to_dict())
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 @level.command(name="set-current")
 @click.argument("level_id", required=False)
@@ -988,7 +1029,7 @@ def level_set_current(ctx, level_id, opt_level_id):
         active = session_mgr.set_current_level(target_id)
         output_result(ctx, {"current_level": active, "current_level_id": active})
     except ValueError as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 @level.command(name="list")
 @click.pass_context
@@ -1133,7 +1174,7 @@ def gui_cmd(ctx, project_file):
         res = launch_gui(target)
         output_result(ctx, res)
     except RuntimeError as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 @cli.command(name="capability")
 @click.pass_context

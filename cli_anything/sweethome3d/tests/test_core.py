@@ -3912,3 +3912,170 @@ def test_version_and_persisted_strict_validation_positive_control(tmp_path, monk
     result = CliRunner().invoke(command.cli, ["--version"])
     assert result.exit_code == 0 and command.__version__ in result.output
 
+
+
+def persist(tmp_path, model):
+    path = tmp_path / "session.json"
+    mgr = SessionManager(str(path)); mgr.model = model; mgr.save_session()
+    return path
+
+
+def invoke(path, *args):
+    return CliRunner().invoke(command.cli, ["--json", "--session", str(path), *args])
+
+
+# ==============================================================================
+# Round 29 Scoped Repair Oracles (16 cases covering R28-P1-01 to R28-P1-05 boundary invariants)
+# ==============================================================================
+
+def test_r29_01_reverse_preserves_native_child_physical_side_after_restart(tmp_path):
+    m = HomeModel()
+    m.add_wall("w", 0, 0, 400, 0, extra_children=[
+        '<texture attribute="leftSideTexture" name="wood" image="wood.png" width="50" height="50"/>',
+        '<baseboard attribute="leftSideBaseboard" thickness="1" height="8"/>'])
+    path = persist(tmp_path, m)
+    result = invoke(path, "wall", "reverse", "w")
+    assert result.exit_code == 0, result.output
+    children = SessionManager(str(path)).model.walls["w"].extra_children
+    assert {ET.fromstring(x).get("attribute") for x in children} == {
+        "rightSideTexture", "rightSideBaseboard"}
+
+
+def test_r29_01_reverse_freezes_resolved_angle_when_native_angle_missing(tmp_path):
+    m = HomeModel(); m.add_wall("w", 0, 0, 400, 0)
+    m.add_opening("d", "Door", wall_id="w", offset_cm=50, width_cm=90,
+                  x_cm=95, y_cm=0, angle_deg=None, swing="left")
+    before = m.openings["d"].get_effective_geometry(m.walls["w"])
+    path = persist(tmp_path, m); result = invoke(path, "wall", "reverse", "w")
+    assert result.exit_code == 0, result.output
+    restored = SessionManager(str(path)).model
+    after = restored.openings["d"].get_effective_geometry(restored.walls["w"])
+    assert after["hinge"] == pytest.approx(before["hinge"], abs=0.01)
+    assert after["open_endpoint"] == pytest.approx(before["open_endpoint"], abs=0.01)
+
+
+def test_r29_01_reverse_failure_restores_direct_objects():
+    m = HomeModel(); m.add_wall("w", 0, 0, 400, 0,
+                               extra_attribs={"heightAtEnd": "invalid"})
+    w = m.walls["w"]; before = copy.deepcopy(m.to_dict())
+    with pytest.raises(ValueError):
+        m.reverse_wall("w")
+    assert m.to_dict() == before
+    assert m.walls["w"] is w and w.x_start == 0 and w.x_end == 400
+
+
+def test_r29_01_split_interpolates_sloped_height():
+    m = HomeModel(); m.add_wall("w", 0, 0, 400, 0, height=280,
+                               extra_attribs={"heightAtEnd": "400"})
+    first, tail = m.split_wall("w", 200, "tail")
+    assert first.height == 280
+    assert float(first.extra_attribs["heightAtEnd"]) == 340
+    assert tail.height == 340
+    assert float(tail.extra_attribs["heightAtEnd"]) == 400
+
+
+def test_r29_01_split_builds_reciprocal_internal_joins():
+    m = HomeModel()
+    m.add_wall("p", -100, 0, 0, 0, extra_attribs={"wallAtEnd": "w"})
+    m.add_wall("w", 0, 0, 400, 0, extra_attribs={"wallAtStart": "p"})
+    first, tail = m.split_wall("w", 200, "tail")
+    assert first.extra_attribs.get("wallAtEnd") == "tail"
+    assert tail.extra_attribs.get("wallAtStart") == "w"
+    assert first.extra_attribs.get("wallAtStart") == "p"
+
+
+def test_r29_02_coincident_arc_overlap_inserts_internal_station():
+    arc = Wall("a", 0, 0, 400, 0, arc_extent=90)
+    mid = arc.point_at_offset(arc.length / 2)
+    half = Wall("b", 0, 0, mid[0], mid[1], arc_extent=45)
+    records = compute_wall_analytic_stations([arc, half])
+    assert any(abs(rec["station_cm"]-arc.length/2) <= 0.01 for rec in records["a"])
+
+
+def test_r29_02_multiway_node_preserves_all_peer_relations():
+    records = compute_wall_analytic_stations([
+        Wall("a", -100, 0, 100, 0), Wall("b", 0, -100, 0, 100),
+        Wall("c", -100, -100, 100, 100)])
+    center = [r for r in records["a"] if abs(r["station_cm"]-100) < 0.01]
+    peers = set()
+    for record in center:
+        peers.update(record.get("peer_ids", []))
+        if record.get("peer_id") is not None:
+            peers.add(record["peer_id"])
+    assert peers == {"b", "c"}
+
+
+def test_r29_03_native_import_refuses_same_unrepresentable_profile_as_output():
+    m = HomeModel(); m.add_wall("w", 0, 0, 300, 0, arc_extent=90)
+    root = ET.fromstring(m.to_xml()); root.find("wall").set("xEnd", "90000")
+    xml = ET.tostring(root, encoding="unicode")
+    candidate = HomeModel(); candidate.add_wall("w", 0, 0, 90000, 0, arc_extent=90)
+    try:
+        candidate.to_xml()
+    except ValueError:
+        with pytest.raises(ValueError):
+            HomeModel.from_xml(xml)
+    else:
+        HomeModel.from_xml(xml)
+
+
+def test_r29_03_small_sweep_with_bounded_path_not_rejected_for_unencoded_center():
+    m = HomeModel(); m.add_wall("w", 0, 0, 300, 0, arc_extent=0.1)
+    wall = m.walls["w"]
+    assert wall.chord_length == 300
+    assert abs(wall.point_at_offset(wall.length/2)[1]) < 0.1
+    xml = m.to_xml()
+    assert HomeModel.from_xml(xml).walls["w"].arc_extent == pytest.approx(0.1)
+
+
+def test_r29_04_archive_generation_cannot_publish_loader_rejected_names(tmp_path):
+    m = HomeModel(); m.add_wall("w", 0, 0, 300, 0)
+    m.extra_zip_entries = {"../escape.bin": b"payload"}
+    target = tmp_path / "plan.sh3d"; target.write_bytes(b"predecessor")
+    with pytest.raises(ValueError):
+        m.save_sh3d(str(target))
+    assert target.read_bytes() == b"predecessor"
+
+
+@pytest.mark.parametrize("alias", ["textures/./wood.bin", "textures//wood.bin"])
+def test_r29_04_archive_dot_and_empty_component_aliases_rejected(tmp_path, alias):
+    m = HomeModel(); m.add_wall("w", 0, 0, 300, 0)
+    path = tmp_path / "aliases.sh3d"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("Home.xml", m.to_xml())
+        z.writestr("textures/wood.bin", b"one")
+        z.writestr(alias, b"two")
+    before = path.read_bytes()
+    with pytest.raises(ValueError):
+        HomeModel.load_sh3d(str(path))
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("operation", ["add", "reverse"])
+def test_r29_05_same_io_error_has_same_public_code_and_byte_preservation(tmp_path, monkeypatch, operation):
+    m = HomeModel(); m.add_wall("w", 0, 0, 300, 0)
+    path = persist(tmp_path, m); before = path.read_bytes()
+    def denied(*args, **kwargs):
+        raise PermissionError("permission denied")
+    monkeypatch.setattr(SessionManager, "save_session", denied)
+    args = ["wall", "reverse", "w"] if operation == "reverse" else [
+        "wall", "add", "--id", "other", "--x1", "500", "--y1", "0", "--x2", "800", "--y2", "0"]
+    result = invoke(path, *args)
+    assert result.exit_code == 6, result.output
+    assert json.loads(result.stdout)["error"]["code"] == "IO_ERROR"
+    assert path.read_bytes() == before
+
+
+def test_r29_05_unsupported_exception_not_misreported_as_validation():
+    assert command.classify_error(ValueError("Unsupported project format")) == (5, "UNSUPPORTED")
+
+
+def test_r29_05_public_constructor_failure_has_structured_error(tmp_path):
+    path = tmp_path / "session.json"; path.write_text("[]", encoding="utf-8")
+    before = path.read_bytes()
+    result = invoke(path, "project", "info")
+    assert result.exit_code != 0
+    assert result.stdout.strip(), f"Missing JSON envelope: {result.exception!r}"
+    payload = json.loads(result.stdout)
+    assert payload["protocol_version"] == "1" and payload["status"] == "error"
+    assert path.read_bytes() == before
