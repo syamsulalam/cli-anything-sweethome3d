@@ -8,7 +8,8 @@ class DimensionLine:
     """Represents an architectural dimension line in Sweet Home 3D."""
 
     def __init__(self, dimension_id, x_start, y_start, x_end, y_end, offset_cm=30.0,
-                 level_id="level1", elevation_cm=0.0, extra_attribs=None, extra_children=None):
+                 level_id="level1", elevation_cm=0.0, elevation_start_cm=None, elevation_end_cm=None,
+                 extra_attribs=None, extra_children=None):
         self.id = str(dimension_id)
         self.x_start = float(x_start)
         self.y_start = float(y_start)
@@ -16,7 +17,9 @@ class DimensionLine:
         self.y_end = float(y_end)
         self.offset_cm = float(offset_cm)
         self.level_id = str(level_id)
-        self.elevation_cm = float(elevation_cm)
+        self.elevation_start_cm = float(elevation_start_cm) if elevation_start_cm is not None else float(elevation_cm)
+        self.elevation_end_cm = float(elevation_end_cm) if elevation_end_cm is not None else self.elevation_start_cm
+        self.elevation_cm = self.elevation_start_cm
         self.extra_attribs = dict(extra_attribs) if extra_attribs else {}
         self.extra_children = list(extra_children) if extra_children else []
 

@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.9.0 (PAC-1 Contract Iteration 18)  
+**Document Version:** 2.10.0 (PAC-1 Contract Iteration 19)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -179,6 +179,22 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
   - Supported internal room holes in `Room` data model and model serialization, preventing silent geometry loss. (`✅ Completed`)
 - [x] **Reconciled Test Suite**:
   - **133 total tests passing in 5.14s** (129 core + 4 E2E; all 10 Round 17 oracles green). (`✅ Completed`)
+
+### Phase 14: Sol Round 18 Prescriptions — Room Holes, Bi-directional Opening Codec, Shared Wall Material Kernel & Protocol Error Uniformity (PAC-1 Iteration 19)
+- [x] **R18-P1-01: Room Holes Connected to Geometry Consumers (Gates T07, E03, N09)**:
+  - Connected room-hole storage directly to consumers: `area_cm2` Shoelace subtraction of holes, `get_clear_core_polygon` with holes, furniture containment void detection (`FURNITURE_OUTSIDE_ROOM`), and explicit refusal on native export of un-decomposed room holes (`ValueError`). (`✅ Completed`)
+- [x] **R18-P1-02: Bidirectional Semantic Opening & Dimension Codec (Gates N02, N03, N07, N09, E07)**:
+  - Namespaced metadata property `cli-anything.opening.v1` preserving opening kind and swing operation; fallback native sash inference.
+  - Native root categories ordered strictly by DTD rank (`compass` < `observerCamera` < `level`).
+  - Preserved unequal dimension elevations (`elevationStart` and `elevationEnd`). (`✅ Completed`)
+- [x] **R18-P1-03: Shared Wall-Sweep Material Resolver (Gates C04, C08)**:
+  - Unified `resolve_wall_material` and `_make_door_sector_poly` kernel used across both furniture and door-wall collision checks.
+  - Full world-Z interval comparisons across upper levels, scale-bounded curved wall polygon buffering (`LineString.buffer` with flat caps), and opening cutout subtraction across vertical slabs. (`✅ Completed`)
+- [x] **R18-P1-04: Strict Validation & Click Usage Error Protocol Uniformity (Gates A04, A07)**:
+  - `JsonEnvelopeGroup` custom Click Group catching `ClickException` under `--json` mode and emitting versioned JSON envelope (`protocol_version: "1"`, exit code 2).
+  - `output_error` called in strict validation (`VALIDATION_REJECTED`, exit code 3) with full validation findings and `allow_nan=False`. (`✅ Completed`)
+- [x] **Reconciled Test Suite**:
+  - **147 total tests passing in 8.18s** (143 core + 4 E2E; all 14 Round 18 oracles green). (`✅ Completed`)
 
 
 

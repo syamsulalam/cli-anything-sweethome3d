@@ -185,32 +185,70 @@ def output_result(ctx, data, human_formatter=None):
     else:
         skin.success(str(data))
 
-def output_error(ctx, message, code=1, error_code=None):
-    """Outputs structured error either as JSON or human-readable format (PAC-1 A04, R17-P1-04)."""
-    is_json = ctx.obj.get("json", False) if ctx.obj else False
+def output_error(ctx, message, code=1, error_code=None, data=None):
+    """Outputs structured error either as JSON or human-readable format (PAC-1 A04, R17-P1-04, R18-P1-04)."""
+    is_json = ctx.obj.get("json", False) if (ctx and ctx.obj) else False
     if is_json:
         payload = {
             "protocol_version": "1",
             "status": "error",
             "outcome": "error",
             "project": {
-                "name": session_mgr.model.name if session_mgr.model else None,
-                "active_file": session_mgr.active_file,
+                "name": session_mgr.model.name if (session_mgr and session_mgr.model) else None,
+                "active_file": getattr(session_mgr, "active_file", None),
                 "revision": getattr(session_mgr, "revision", 0),
             },
-            "data": None,
+            "data": data,
             "error": {
                 "code": error_code or "ERROR",
                 "message": str(message)
             },
             "message": str(message)
         }
-        click.echo(json.dumps(payload, indent=2))
+        click.echo(json.dumps(payload, indent=2, allow_nan=False))
     else:
         skin.error(str(message))
+        if isinstance(data, dict):
+            for err in data.get("errors", []):
+                skin.error(f"Error: {err}")
+            for warn in data.get("warnings", []):
+                skin.warning(f"Warning: {warn}")
     sys.exit(code)
 
-@click.group(invoke_without_command=True)
+class JsonEnvelopeGroup(click.Group):
+    """Custom Click Group that captures usage and Click exceptions under --json mode and emits versioned JSON error envelope (PAC-1 A04, R18-P1-04)."""
+    def main(self, args=None, prog_name=None, complete_var=None, standalone_mode=True, **extra):
+        raw_args = list(sys.argv[1:] if args is None else args)
+        is_json = "--json" in raw_args
+        try:
+            return super().main(args=args, prog_name=prog_name, complete_var=complete_var, standalone_mode=False, **extra)
+        except click.ClickException as e:
+            if is_json:
+                payload = {
+                    "protocol_version": "1",
+                    "status": "error",
+                    "outcome": "error",
+                    "project": None,
+                    "data": None,
+                    "error": {
+                        "code": "INPUT_ERROR",
+                        "message": e.format_message(),
+                    },
+                    "message": e.format_message(),
+                }
+                click.echo(json.dumps(payload, indent=2, allow_nan=False))
+                sys.exit(e.exit_code)
+            else:
+                if standalone_mode:
+                    e.show()
+                    sys.exit(e.exit_code)
+                raise
+        except click.exceptions.Exit as e:
+            if standalone_mode:
+                sys.exit(e.exit_code)
+            raise
+
+@click.group(cls=JsonEnvelopeGroup, invoke_without_command=True)
 @click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
 @click.pass_context
 def cli(ctx, json_mode):
@@ -303,19 +341,13 @@ def project_validate(ctx, strict):
     )
 
     if has_strict_failure:
-        if is_json:
-            click.echo(json.dumps({
-                "status": "error",
-                "error": "Strict validation failed: model violates constraints or has unchecked coverage.",
-                "data": val
-            }, indent=2))
-        else:
-            skin.error("Project validation FAILED (strict mode).")
-            for err in val.get("errors", []):
-                skin.error(f"Error: {err}")
-            for warn in val.get("warnings", []):
-                skin.warning(f"Warning: {warn}")
-        ctx.exit(1)
+        output_error(
+            ctx,
+            "Strict validation failed: model violates constraints or has unchecked coverage.",
+            code=3,
+            error_code="VALIDATION_REJECTED",
+            data=val,
+        )
 
     def formatter(d):
         if d["valid"]:

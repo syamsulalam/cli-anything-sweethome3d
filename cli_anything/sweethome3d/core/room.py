@@ -19,16 +19,20 @@ class Room:
 
     @property
     def area_cm2(self):
-        """Calculates polygon area in square centimeters using the Shoelace formula."""
-        n = len(self.points)
-        if n < 3:
-            return 0.0
-        area = 0.0
-        for i in range(n):
-            j = (i + 1) % n
-            area += self.points[i][0] * self.points[j][1]
-            area -= self.points[j][0] * self.points[i][1]
-        return abs(area) / 2.0
+        """Calculates polygon area in square centimeters using the Shoelace formula minus holes (PAC-1 T07, R18-P1-01)."""
+        def _poly_area(pts):
+            n = len(pts)
+            if n < 3:
+                return 0.0
+            area = 0.0
+            for i in range(n):
+                j = (i + 1) % n
+                area += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1]
+            return abs(area) / 2.0
+
+        shell_area = _poly_area(self.points)
+        hole_area = sum(_poly_area(h) for h in self.holes) if self.holes else 0.0
+        return max(0.0, shell_area - hole_area)
 
     @property
     def area_m2(self):
@@ -88,7 +92,7 @@ class Room:
         if len(self.points) < 3:
             return None
         
-        poly = Polygon(self.points)
+        poly = Polygon(self.points, holes=self.holes or [])
         if poly.is_empty or not poly.is_valid:
             return poly
 

@@ -8,6 +8,10 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 import pytest
+from click.testing import CliRunner
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+from cli_anything.sweethome3d import sweethome3d_cli as cli_module
 
 from cli_anything.sweethome3d.core.wall import Wall
 from cli_anything.sweethome3d.core.room import Room
@@ -2563,6 +2567,160 @@ def test_json_room_hole_is_not_silently_filled():
         return
     result = json.loads(json.dumps(m.to_dict()))['rooms'][0]
     assert result.get('holes') == [hole]
+
+
+# ==============================================================================
+# Round 18 Acceptance Oracles (PAC-1 R18-P1-01 .. R18-P1-04)
+# ==============================================================================
+
+def holed_model():
+    return HomeModel.from_dict({'name':'Hole','rooms':[{
+        'id':'r','name':'Room','level_id':'level1',
+        'points':[[0,0],[400,0],[400,400],[0,400]],
+        'holes':[[[100,100],[200,100],[200,200],[100,200]]]
+    }]})
+
+
+def test_hole_area_and_clear_core_respect_void():
+    m = holed_model()
+    r = m.rooms['r']
+    assert r.area_cm2 == pytest.approx(150000.0)
+    assert r.get_clear_core_polygon([]).area == pytest.approx(150000.0)
+    assert m.total_area_m2 == pytest.approx(15.0)
+
+
+def test_furniture_in_room_hole_is_outside_free_region():
+    m = holed_model()
+    m.add_furniture('f','Custom',catalog_id='custom',x_cm=150,y_cm=150,
+                    width_cm=10,depth_cm=10,height_cm=50,room_id='r')
+    assert 'FURNITURE_OUTSIDE_ROOM' in {f['code'] for f in m.validate()['findings']}
+
+
+def test_native_hole_export_preserves_region_or_refuses():
+    m = holed_model()
+    try:
+        xml = m.to_xml()
+    except ValueError as exc:
+        assert 'hole' in str(exc).lower()
+        return
+    imported = HomeModel.from_xml(xml)
+    actual = unary_union([Polygon(r.points, holes=getattr(r,'holes',None))
+                          for r in imported.rooms.values()])
+    expected = Polygon([(0,0),(400,0),(400,400),(0,400)],
+                       holes=[[(100,100),(200,100),(200,200),(100,200)]])
+    assert actual.symmetric_difference(expected).area <= 1e-6
+
+
+@pytest.mark.parametrize('swing',['left','none','sliding'])
+def test_native_opening_operation_roundtrip(swing):
+    m = HomeModel()
+    m.add_wall('host',0,0,300,0)
+    m.add_opening('d','Door',wall_id='host',offset_cm=100,width_cm=90,swing=swing)
+    restored = HomeModel.from_xml(m.to_xml())
+    assert restored.openings['d'].swing == swing
+    if swing == 'left':
+        before = m.openings['d'].get_effective_geometry(m.walls['host'])
+        op = restored.openings['d']
+        after = op.get_effective_geometry(restored.walls.get(op.wall_id))
+        assert math.dist(before['hinge'],after['hinge']) <= 0.01
+        assert math.dist(before['open_endpoint'],after['open_endpoint']) <= 0.01
+
+
+def test_native_window_kind_survives_roundtrip():
+    m = HomeModel()
+    m.add_wall('host',0,0,300,0)
+    m.add_opening('win','Window',wall_id='host',offset_cm=100,width_cm=90,
+                  opening_type='window',swing='none',elevation_cm=90,height_cm=100)
+    restored = HomeModel.from_xml(m.to_xml())
+    assert restored.openings['win'].opening_type == 'window'
+    assert restored.openings['win'].swing == 'none'
+    assert ET.fromstring(restored.to_xml()).find('doorOrWindow/sash') is None
+
+
+def test_dimension_unequal_elevations_are_not_flattened():
+    xml = '''<home version="7400">
+      <level id="level1" name="Ground" elevation="0" floorThickness="12" height="280"/>
+      <dimensionLine id="d" level="level1" xStart="0" yStart="0" xEnd="100" yEnd="0"
+                     offset="30" elevationStart="0" elevationEnd="100"/>
+    </home>'''
+    try:
+        m = HomeModel.from_xml(xml)
+        result = ET.fromstring(m.to_xml()).find('dimensionLine')
+    except ValueError as exc:
+        assert 'elevation' in str(exc).lower()
+        return
+    assert float(result.get('elevationStart')) == 0.0
+    assert float(result.get('elevationEnd')) == 100.0
+
+
+def test_preserved_native_camera_and_compass_precede_levels():
+    m = HomeModel()
+    m.add_wall('w',0,0,300,0)
+    m.extra_elements = [
+        '<compass x="0" y="0" diameter="50"/>',
+        '<observerCamera id="obs" attribute="observerCamera" x="0" y="0" z="170" '
+        'yaw="0" pitch="0" fieldOfView="1"/>'
+    ]
+    tags = [e.tag for e in ET.fromstring(m.to_xml())]
+    assert tags.index('compass') < tags.index('observerCamera') < tags.index('level')
+
+
+def test_strict_validation_error_uses_versioned_envelope(tmp_path,monkeypatch):
+    mgr = SessionManager(str(tmp_path/'session.json'))
+    mgr.model.add_wall('zero',0,0,0,0)
+    monkeypatch.setattr(cli_module,'_session_mgr',mgr)
+    r = CliRunner().invoke(cli_module.cli,['--json','project','validate','--strict'])
+    assert r.exit_code != 0
+    p = json.loads(r.stdout)
+    assert p.get('protocol_version') == '1'
+    assert isinstance(p.get('error'),dict)
+    assert isinstance(p['error'].get('code'),str)
+
+
+def test_click_usage_error_uses_versioned_envelope(tmp_path,monkeypatch):
+    mgr = SessionManager(str(tmp_path/'session.json'))
+    monkeypatch.setattr(cli_module,'_session_mgr',mgr)
+    r = CliRunner().invoke(cli_module.cli,['--json','project','info','--not-a-real-option'])
+    assert r.exit_code == 2
+    p = json.loads(r.stdout)
+    assert p.get('protocol_version') == '1'
+    assert isinstance(p.get('error'),dict)
+
+
+def sweep_model(level_id='level1',elevation_cm=0):
+    m = HomeModel()
+    if level_id != 'level1':
+        m.add_level(level_id,'Upper',elevation_cm=elevation_cm)
+    m.add_wall('host',0,0,300,0,level_id=level_id)
+    m.add_opening('d','Door',wall_id='host',offset_cm=100,width_cm=90,
+                  swing='right',level_id=level_id)
+    return m
+
+
+def test_door_wall_collision_uses_world_z_on_upper_level():
+    m = sweep_model('upper',300)
+    m.add_wall('blocker',110,30,180,30,thickness=10,level_id='upper')
+    assert any(f['code']=='DOOR_WALL_COLLISION' and set(f['entity_ids'])=={'d','blocker'}
+               for f in m.validate()['findings'])
+
+
+def test_door_wall_collision_uses_curved_wall_material():
+    m = sweep_model()
+    m.add_wall('curve',80,100,220,100,thickness=10,arc_extent=-90)
+    w = m.walls['curve']
+    midpoint = w.point_at_offset(w.length/2)
+    assert math.dist((100,0),midpoint) < 90
+    assert any(f['code']=='DOOR_WALL_COLLISION' and set(f['entity_ids'])=={'d','curve'}
+               for f in m.validate()['findings'])
+
+
+def test_door_wall_collision_subtracts_active_cutout_void():
+    m = sweep_model()
+    m.add_wall('partition',80,30,220,30,thickness=10)
+    m.add_opening('void','Cased opening',wall_id='partition',offset_cm=20,
+                  width_cm=100,height_cm=210,depth_cm=10,swing='none')
+    assert not any(f['code']=='DOOR_WALL_COLLISION' and set(f['entity_ids'])=={'d','partition'}
+                   for f in m.validate()['findings'])
 
 
 

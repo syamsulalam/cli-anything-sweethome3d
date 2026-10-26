@@ -1,10 +1,13 @@
 import os
 import math
+import json
 import zipfile
 import base64
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from collections import Counter
+from dataclasses import dataclass
+from typing import Iterable, Any, List
 
 from cli_anything.sweethome3d.core.wall import Wall
 from cli_anything.sweethome3d.core.room import Room
@@ -36,6 +39,136 @@ def _resolve_curved_wall_circle(w):
     cx = mx - sign * h * nx
     cy = my - sign * h * ny
     return (cx, cy, r)
+
+
+def _is_finite_wall(w):
+    return all(math.isfinite(v) for v in (w.x_start, w.y_start, w.x_end, w.y_end, w.height, w.thickness, w.arc_extent))
+
+
+def _is_finite_room(r):
+    return len(r.points) >= 3 and all(math.isfinite(p[0]) and math.isfinite(p[1]) for p in r.points)
+
+
+def _is_finite_opening(op):
+    vals = [op.offset_cm, op.width_cm, op.height_cm, op.elevation_cm]
+    if op.depth_cm is not None: vals.append(op.depth_cm)
+    if op.x_cm is not None: vals.append(op.x_cm)
+    if op.y_cm is not None: vals.append(op.y_cm)
+    if op.angle_deg is not None: vals.append(op.angle_deg)
+    return all(math.isfinite(v) for v in vals)
+
+
+def _is_finite_furniture(f):
+    return all(math.isfinite(v) for v in (f.x_cm, f.y_cm, f.elevation_cm, f.width_cm, f.depth_cm, f.height_cm, f.angle_deg))
+
+
+@dataclass(frozen=True)
+class MaterialSlice:
+    z0_cm: float
+    z1_cm: float
+    polygon: Any
+
+
+def resolve_wall_material(model, wall, *, z0_cm: float, z1_cm: float, error_cm: float = 0.01) -> List[MaterialSlice]:
+    """Resolves physical 2D wall material slices across the world-Z interval [z0_cm, z1_cm].
+    Accounts for curved wall geometry, wall height, and active opening cutouts (PAC-1 C04, C08, R18-P1-03).
+    """
+    try:
+        from shapely.geometry import Polygon, LineString
+    except ImportError:
+        return []
+
+    w_lvl = model.get_level(wall.level_id)
+    w_elev = w_lvl.elevation_cm if w_lvl else 0.0
+    w_world_z0 = w_elev
+    w_world_z1 = w_world_z0 + wall.height
+
+    overlap_z0 = max(z0_cm, w_world_z0)
+    overlap_z1 = min(z1_cm, w_world_z1)
+    if overlap_z0 >= overlap_z1 - 1e-4:
+        return []
+
+    # 2D base wall footprint polygon
+    if abs(wall.arc_extent) > 1e-4 and wall.length > 0:
+        steps = wall.get_curve_sampling_steps(error_tol=error_cm)
+        pts = [wall.point_at_offset(i * wall.length / steps) for i in range(steps + 1)]
+        wall_poly = LineString(pts).buffer(wall.thickness / 2.0, cap_style="flat")
+    else:
+        L = wall.length
+        if L < 1e-4:
+            return []
+        nx = -(wall.y_end - wall.y_start) / L * (wall.thickness / 2.0)
+        ny = (wall.x_end - wall.x_start) / L * (wall.thickness / 2.0)
+        wall_corners = [
+            (wall.x_start + nx, wall.y_start + ny),
+            (wall.x_end + nx, wall.y_end + ny),
+            (wall.x_end - nx, wall.y_end - ny),
+            (wall.x_start - nx, wall.y_start - ny),
+        ]
+        wall_poly = Polygon(wall_corners)
+
+    openings_on_wall = [op for op in model.openings.values() if op.wall_id == wall.id and _is_finite_opening(op)]
+    z_breaks = {overlap_z0, overlap_z1}
+    for op in openings_on_wall:
+        op_world_z0 = w_elev + op.elevation_cm
+        op_world_z1 = op_world_z0 + op.height_cm
+        if overlap_z0 < op_world_z0 < overlap_z1:
+            z_breaks.add(op_world_z0)
+        if overlap_z0 < op_world_z1 < overlap_z1:
+            z_breaks.add(op_world_z1)
+
+    z_sorted = sorted(z_breaks)
+    slices = []
+    for k in range(len(z_sorted) - 1):
+        slab_z0 = z_sorted[k]
+        slab_z1 = z_sorted[k + 1]
+        if slab_z1 - slab_z0 < 1e-4:
+            continue
+        slab_poly = wall_poly
+        for op in openings_on_wall:
+            op_world_z0 = w_elev + op.elevation_cm
+            op_world_z1 = op_world_z0 + op.height_cm
+            if op_world_z0 <= slab_z0 + 1e-4 and op_world_z1 >= slab_z1 - 1e-4:
+                geom = op.get_effective_geometry(wall)
+                if geom:
+                    p1 = geom["p1"]
+                    p2 = geom["p2"]
+                    t_cut = max(wall.thickness * 1.5, 30.0)
+                    nx = geom["nx"] * (t_cut / 2.0)
+                    ny = geom["ny"] * (t_cut / 2.0)
+                    cutout_poly = Polygon([
+                        (p1[0] + nx, p1[1] + ny),
+                        (p2[0] + nx, p2[1] + ny),
+                        (p2[0] - nx, p2[1] - ny),
+                        (p1[0] - nx, p1[1] - ny),
+                    ])
+                    slab_poly = slab_poly.difference(cutout_poly)
+        if not slab_poly.is_empty:
+            slices.append(MaterialSlice(z0_cm=slab_z0, z1_cm=slab_z1, polygon=slab_poly))
+    return slices
+
+
+def _make_door_sector_poly(hinge, p_latch, p_open, n_steps=32):
+    """Constructs a 2D polygonal approximation of a circular door swing sector (PAC-1 C08, R18-P1-03)."""
+    try:
+        from shapely.geometry import Polygon
+    except ImportError:
+        return None
+    v_latch = (p_latch[0] - hinge[0], p_latch[1] - hinge[1])
+    v_open = (p_open[0] - hinge[0], p_open[1] - hinge[1])
+    r_swing = math.hypot(v_latch[0], v_latch[1])
+    if r_swing < 1e-4:
+        return None
+    a_closed = math.atan2(v_latch[1], v_latch[0])
+    a_open = math.atan2(v_open[1], v_open[0])
+    diff = (a_open - a_closed) % (2.0 * math.pi)
+    if diff > math.pi:
+        diff -= 2.0 * math.pi
+    pts = [hinge]
+    for i in range(n_steps + 1):
+        ang = a_closed + (diff * i / n_steps)
+        pts.append((hinge[0] + r_swing * math.cos(ang), hinge[1] + r_swing * math.sin(ang)))
+    return Polygon(pts)
 
 
 def _compute_unique_curved_runs(lvl_walls, epsilon=0.01):
@@ -381,11 +514,14 @@ class HomeModel:
 
     # Dimension methods
     def add_dimension(self, dimension_id, x_start, y_start, x_end, y_end, offset_cm=30.0,
-                      level_id="level1", elevation_cm=0.0, extra_attribs=None, extra_children=None, replace=False):
+                      level_id="level1", elevation_cm=0.0, elevation_start_cm=None, elevation_end_cm=None,
+                      extra_attribs=None, extra_children=None, replace=False):
         dimension_id = str(dimension_id)
         if dimension_id in self.dimensions and not replace:
             raise ValueError(f"Dimension line with ID '{dimension_id}' already exists in project.")
-        dim = DimensionLine(dimension_id, x_start, y_start, x_end, y_end, offset_cm, level_id, elevation_cm,
+        dim = DimensionLine(dimension_id, x_start, y_start, x_end, y_end, offset_cm, level_id,
+                            elevation_cm=elevation_cm, elevation_start_cm=elevation_start_cm,
+                            elevation_end_cm=elevation_end_cm,
                             extra_attribs=extra_attribs, extra_children=extra_children)
         self.dimensions[dim.id] = dim
         return dim
@@ -1374,43 +1510,65 @@ class HomeModel:
                         warnings.append(msg)
                         findings.append({"code": "DOOR_SWEEP_COLLISION", "severity": "warning", "entity_ids": [op.id, f.id], "message": msg})
 
-                # PAC-1 C08, R17-P1-06: Check door swing sector against obstacle wall material
+                # PAC-1 C08, R17-P1-06, R18-P1-03: Check door swing sector against obstacle wall material
+                op_lvl = self.get_level(lvl)
+                op_world_z0 = (op_lvl.elevation_cm if op_lvl else 0.0) + op.elevation_cm
+                op_world_z1 = op_world_z0 + op.height_cm
+                door_sector_poly = _make_door_sector_poly(hinge, p_latch, p_open)
+
                 for other_w in self.walls.values():
                     if other_w.id == op.wall_id:
                         continue  # Host wall is exempted
-                    other_lvl = other_w.level_id or "level1"
-                    if other_lvl != lvl:
+                    if not _is_finite_wall(other_w):
                         continue
-                    w_elev = 0.0
-                    w_lvl_obj = self.get_level(other_lvl)
-                    if w_lvl_obj:
-                        w_elev = w_lvl_obj.elevation_cm
-                    if w_elev >= op.elevation_cm + op.height_cm or w_elev + other_w.height <= op.elevation_cm:
-                        continue
-                    L = other_w.length
-                    if L < 1e-4:
-                        continue
-                    nx = -(other_w.y_end - other_w.y_start) / L * (other_w.thickness / 2.0)
-                    ny = (other_w.x_end - other_w.x_start) / L * (other_w.thickness / 2.0)
-                    w_corners = [
-                        (other_w.x_start + nx, other_w.y_start + ny),
-                        (other_w.x_end + nx, other_w.y_end + ny),
-                        (other_w.x_end - nx, other_w.y_end - ny),
-                        (other_w.x_start - nx, other_w.y_start - ny)
-                    ]
-                    if _door_sector_intersects_polygon(hinge, p_latch, p_open, w_corners, tol=0.1):
+
+                    has_wall_collision = False
+                    collision_witness = None
+                    if door_sector_poly is not None:
+                        slices = resolve_wall_material(self, other_w, z0_cm=op_world_z0, z1_cm=op_world_z1)
+                        for s in slices:
+                            inter = door_sector_poly.intersection(s.polygon)
+                            if not inter.is_empty and inter.area > 0.05:
+                                has_wall_collision = True
+                                collision_witness = {
+                                    "penetration_area_cm2": round(inter.area, 2),
+                                    "vertical_slab_cm": [round(s.z0_cm, 1), round(s.z1_cm, 1)]
+                                }
+                                break
+                    else:
+                        other_lvl = other_w.level_id or "level1"
+                        w_lvl_obj = self.get_level(other_lvl)
+                        w_elev = w_lvl_obj.elevation_cm if w_lvl_obj else 0.0
+                        if max(op_world_z0, w_elev) < min(op_world_z1, w_elev + other_w.height) - 1e-4:
+                            L = other_w.length
+                            if L >= 1e-4:
+                                nx = -(other_w.y_end - other_w.y_start) / L * (other_w.thickness / 2.0)
+                                ny = (other_w.x_end - other_w.x_start) / L * (other_w.thickness / 2.0)
+                                w_corners = [
+                                    (other_w.x_start + nx, other_w.y_start + ny),
+                                    (other_w.x_end + nx, other_w.y_end + ny),
+                                    (other_w.x_end - nx, other_w.y_end - ny),
+                                    (other_w.x_start - nx, other_w.y_start - ny)
+                                ]
+                                if _door_sector_intersects_polygon(hinge, p_latch, p_open, w_corners, tol=0.1):
+                                    has_wall_collision = True
+
+                    if has_wall_collision:
                         msg = f"Door '{op.id}' swing sector collides with wall '{other_w.id}'."
                         warnings.append(msg)
-                        findings.append({
+                        finding_data = {
                             "code": "DOOR_WALL_COLLISION",
                             "severity": "warning",
                             "entity_ids": [op.id, other_w.id],
                             "message": msg
-                        })
+                        }
+                        if collision_witness:
+                            finding_data["witness"] = collision_witness
+                        findings.append(finding_data)
 
         # Gate C03 & C04: Check furniture vs physical wall material (accounting for opening cutouts)
         try:
-            from shapely.geometry import Polygon, LineString
+            from shapely.geometry import Polygon
             has_shapely = True
         except ImportError:
             has_shapely = False
@@ -1429,93 +1587,23 @@ class HomeModel:
                 for w in self.walls.values():
                     if not _is_finite_wall(w):
                         continue
-                    w_lvl = self.get_level(w.level_id)
-                    w_elev = w_lvl.elevation_cm if w_lvl else 0.0
-                    w_world_z0 = w_elev
-                    w_world_z1 = w_world_z0 + w.height
-
-                    # Check world Z interval overlap
-                    overlap_z0 = max(f_world_z0, w_world_z0)
-                    overlap_z1 = min(f_world_z1, w_world_z1)
-                    if overlap_z0 >= overlap_z1 - 1e-4:
-                        continue
-
-                    # Construct 2D wall polygon
-                    if abs(w.arc_extent) > 1e-4 and w.length > 0:
-                        steps = w.get_curve_sampling_steps()
-                        pts = [w.point_at_offset(i * w.length / steps) for i in range(steps + 1)]
-                        wall_poly = LineString(pts).buffer(w.thickness / 2.0, cap_style="square")
-                    else:
-                        L = w.length
-                        if L < 1e-4:
-                            continue
-                        nx = -(w.y_end - w.y_start) / L * (w.thickness / 2.0)
-                        ny = (w.x_end - w.x_start) / L * (w.thickness / 2.0)
-                        wall_corners = [
-                            (w.x_start + nx, w.y_start + ny),
-                            (w.x_end + nx, w.y_end + ny),
-                            (w.x_end - nx, w.y_end - ny),
-                            (w.x_start - nx, w.y_start - ny),
-                        ]
-                        wall_poly = Polygon(wall_corners)
-
-                    # Collect vertical breakpoints from openings on this wall
-                    z_breaks = {overlap_z0, overlap_z1}
-                    openings_on_wall = [op for op in self.openings.values() if op.wall_id == w.id and _is_finite_opening(op)]
-                    for op in openings_on_wall:
-                        op_world_z0 = w_elev + op.elevation_cm
-                        op_world_z1 = op_world_z0 + op.height_cm
-                        if overlap_z0 < op_world_z0 < overlap_z1:
-                            z_breaks.add(op_world_z0)
-                        if overlap_z0 < op_world_z1 < overlap_z1:
-                            z_breaks.add(op_world_z1)
-
-                    z_sorted = sorted(z_breaks)
-
-                    # Check each vertical slab
-                    for k in range(len(z_sorted) - 1):
-                        slab_z0 = z_sorted[k]
-                        slab_z1 = z_sorted[k + 1]
-                        if slab_z1 - slab_z0 < 1e-4:
-                            continue
-                        slab_poly = wall_poly
-
-                        # Subtract opening cutouts that are active throughout this slab
-                        for op in openings_on_wall:
-                            op_world_z0 = w_elev + op.elevation_cm
-                            op_world_z1 = op_world_z0 + op.height_cm
-                            if op_world_z0 <= slab_z0 + 1e-4 and op_world_z1 >= slab_z1 - 1e-4:
-                                geom = op.get_effective_geometry(w)
-                                if geom:
-                                    p1 = geom["p1"]
-                                    p2 = geom["p2"]
-                                    t_cut = max(w.thickness * 1.5, 30.0)
-                                    nx = geom["nx"] * (t_cut / 2.0)
-                                    ny = geom["ny"] * (t_cut / 2.0)
-                                    cutout_poly = Polygon([
-                                        (p1[0] + nx, p1[1] + ny),
-                                        (p2[0] + nx, p2[1] + ny),
-                                        (p2[0] - nx, p2[1] - ny),
-                                        (p1[0] - nx, p1[1] - ny),
-                                    ])
-                                    slab_poly = slab_poly.difference(cutout_poly)
-
-                        if not slab_poly.is_empty:
-                            inter = furn_poly.intersection(slab_poly)
-                            if not inter.is_empty and inter.area > 0.05:
-                                msg = f"Furniture '{f.id}' ({f.name}) collides with wall material of '{w.id}'."
-                                warnings.append(msg)
-                                findings.append({
-                                    "code": "FURNITURE_WALL_COLLISION",
-                                    "severity": "warning",
-                                    "entity_ids": [f.id, w.id],
-                                    "message": msg,
-                                    "witness": {
-                                        "penetration_area_cm2": round(inter.area, 2),
-                                        "vertical_slab_cm": [round(slab_z0, 1), round(slab_z1, 1)]
-                                    }
-                                })
-                                break
+                    slices = resolve_wall_material(self, w, z0_cm=f_world_z0, z1_cm=f_world_z1)
+                    for s in slices:
+                        inter = furn_poly.intersection(s.polygon)
+                        if not inter.is_empty and inter.area > 0.05:
+                            msg = f"Furniture '{f.id}' ({f.name}) collides with wall material of '{w.id}'."
+                            warnings.append(msg)
+                            findings.append({
+                                "code": "FURNITURE_WALL_COLLISION",
+                                "severity": "warning",
+                                "entity_ids": [f.id, w.id],
+                                "message": msg,
+                                "witness": {
+                                    "penetration_area_cm2": round(inter.area, 2),
+                                    "vertical_slab_cm": [round(s.z0_cm, 1), round(s.z1_cm, 1)]
+                                }
+                            })
+                            break
 
             # Gate C05: Check furniture containment in assigned room
             for f in self.furniture.values():
@@ -1548,7 +1636,7 @@ class HomeModel:
                             if clear_poly is not None:
                                 room_poly = clear_poly
                             else:
-                                room_poly = Polygon(r.points)
+                                room_poly = Polygon(r.points, holes=r.holes or [])
                             furn_poly = Polygon(_get_furn_corners(f))
                             if not room_poly.buffer(0.01).covers(furn_poly):
                                 outside = furn_poly.difference(room_poly.buffer(0.01))
@@ -1604,27 +1692,44 @@ class HomeModel:
                 return s.upper()
             return col_str
 
+        # PAC-1 T07, E03, N09, R18-P1-01: Native room holes require a supported decomposition; export refused
+        if any(r.holes for r in self.rooms.values()):
+            raise ValueError("Native room holes require a supported decomposition; export refused")
+
         # Gate N01: Sweet Home 3D native wire version is integer 7400 (not marketing string "7.5")
         native_ver = "7400" if (self.version == "7.5" or not self.version) else str(self.version)
         root_attribs = {"version": native_ver, "name": self.name, "wallHeight": str(self.wall_height)}
         root_attribs.update(self.extra_root_attribs)
         root = ET.Element("home", **root_attribs)
         
-        # PAC-1 N02, R17-P1-03: Root property, environment, camera elements belong BEFORE levels in native Sweet Home 3D DTD
-        PRE_LEVEL_TAGS = {"property", "environment", "camera", "observer"}
+        # PAC-1 N02, R17-P1-03, R18-P1-02: Rank and order native root categories
+        ROOT_CATEGORIES = [
+            ('property',), ('furnitureVisibleProperty',), ('environment',),
+            ('backgroundImage',), ('print',), ('compass',),
+            ('camera', 'observerCamera'), ('level',),
+            ('pieceOfFurniture', 'doorOrWindow', 'furnitureGroup', 'light'),
+            ('wall',), ('room',), ('polyline',), ('dimensionLine',), ('label',)
+        ]
+        ROOT_RANK = {tag: rank for rank, tags in enumerate(ROOT_CATEGORIES) for tag in tags}
+        level_rank = ROOT_RANK['level']
+
         pre_elements = []
         post_elements = []
         for raw_elem_str in self.extra_elements:
             try:
                 el = ET.fromstring(raw_elem_str)
-                if el.tag in PRE_LEVEL_TAGS:
-                    pre_elements.append(el)
+                r = ROOT_RANK.get(el.tag, 999)
+                if r < level_rank:
+                    pre_elements.append((r, el))
                 else:
-                    post_elements.append(raw_elem_str)
+                    post_elements.append((r, el))
             except Exception:
-                post_elements.append(raw_elem_str)
+                post_elements.append((999, raw_elem_str))
 
-        for el in pre_elements:
+        pre_elements.sort(key=lambda item: item[0])
+        post_elements.sort(key=lambda item: item[0])
+
+        for _, el in pre_elements:
             root.append(el)
 
         # Levels (floorThickness preserved from source or default 12.0)
@@ -1682,9 +1787,21 @@ class HomeModel:
                     op_attrib[k] = v
             op_elem = ET.SubElement(root, "doorOrWindow", **op_attrib)
 
-            # Native sash child for door swing
+            # PAC-1 N02, R18-P1-02: Write reversible opening metadata
+            OPENING_META = "cli-anything.opening.v1"
+            meta_dict = {
+                "version": 1,
+                "kind": op.opening_type,
+                "operation": op.swing,
+                "host_id": op.wall_id,
+                "offset_cm": op.offset_cm
+            }
+            ET.SubElement(op_elem, "property", name=OPENING_META,
+                          value=json.dumps(meta_dict, separators=(',', ':'), allow_nan=False))
+
+            # Native sash child for door swing only if opening_type == 'door' and swing in ('left', 'right')
             has_sash = any("<sash" in c for c in op.extra_children)
-            if not has_sash and op.swing in ("left", "right"):
+            if not has_sash and op.opening_type == "door" and op.swing in ("left", "right"):
                 if op.swing == "right":
                     ET.SubElement(op_elem, "sash", xAxis="0.0", yAxis="0.5", width="1.0", startAngle="0.0", endAngle=str(-math.pi / 2))
                 elif op.swing == "left":
@@ -1748,15 +1865,17 @@ class HomeModel:
                 except Exception:
                     pass
 
-        # Dimensions (PAC-1 N02: elevationStart and elevationEnd)
+        # Dimensions (PAC-1 N02, R18-P1-02: elevationStart and elevationEnd)
         for dim in self.dimensions.values():
+            e_start = getattr(dim, "elevation_start_cm", dim.elevation_cm)
+            e_end = getattr(dim, "elevation_end_cm", dim.elevation_cm)
             d_attrib = {
                 "id": dim.id, "level": dim.level_id,
                 "xStart": str(dim.x_start), "yStart": str(dim.y_start),
                 "xEnd": str(dim.x_end), "yEnd": str(dim.y_end),
                 "offset": str(dim.offset_cm),
-                "elevationStart": str(dim.elevation_cm),
-                "elevationEnd": str(dim.elevation_cm),
+                "elevationStart": str(e_start),
+                "elevationEnd": str(e_end),
             }
             d_attrib.update(dim.extra_attribs)
             d_elem = ET.SubElement(root, "dimensionLine", **d_attrib)
@@ -1767,7 +1886,7 @@ class HomeModel:
                     pass
 
         # Preserve unmodeled trailing extra elements
-        for el in post_elements:
+        for _, el in post_elements:
             try:
                 if isinstance(el, str):
                     root.append(ET.fromstring(el))
@@ -1893,6 +2012,40 @@ class HomeModel:
             height_cm = float(elem.attrib.get("height", 210.0))
             op_type = elem.attrib.get("type", "door")
             swing = elem.attrib.get("swing", "right")
+
+            # PAC-1 N02, R18-P1-02: Check for cli-anything.opening.v1 metadata property
+            meta_prop = elem.find("property[@name='cli-anything.opening.v1']")
+            if meta_prop is not None and meta_prop.attrib.get("value"):
+                try:
+                    meta = json.loads(meta_prop.attrib["value"])
+                    if isinstance(meta, dict) and meta.get("version") == 1:
+                        op_type = meta.get("kind", op_type)
+                        swing = meta.get("operation", swing)
+                        if meta.get("host_id"):
+                            wall_id = meta["host_id"]
+                        if meta.get("offset_cm") is not None:
+                            offset_cm = float(meta["offset_cm"])
+                except Exception:
+                    pass
+            else:
+                sashes = elem.findall("sash")
+                if sashes:
+                    op_type = "door"
+                    first_s = sashes[0]
+                    x_axis = float(first_s.attrib.get("xAxis", "0.0"))
+                    if abs(x_axis - 1.0) < 1e-4:
+                        swing = "left"
+                    else:
+                        swing = "right"
+                else:
+                    elem_name = elem.attrib.get("name")
+                    if elem.attrib.get("type") == "window" or (elem_name and "window" in elem_name.lower()):
+                        op_type = "window"
+                        swing = "none"
+                    else:
+                        op_type = elem.attrib.get("type", "door")
+                        swing = elem.attrib.get("swing", "right")
+
             elevation_cm = float(elem.attrib.get("elevation", 0.0))
             depth_cm = float(elem.attrib["depth"]) if "depth" in elem.attrib else None
             x_cm = float(elem.attrib["x"]) if "x" in elem.attrib else None
@@ -1989,16 +2142,13 @@ class HomeModel:
                 extra_children=extra_children,
             )
 
-        # Dimensions (PAC-1 N02, R17-P1-03: support elevationStart / elevationEnd)
+        # Dimensions (PAC-1 N02, R17-P1-03, R18-P1-02: support elevationStart / elevationEnd)
         for elem in root.findall("dimensionLine"):
             known_dim_keys = {"id", "level", "xStart", "yStart", "xEnd", "yEnd", "offset", "elevation", "elevationStart", "elevationEnd"}
             extra_attribs = {k: v for k, v in elem.attrib.items() if k not in known_dim_keys}
             extra_children = [ET.tostring(c, encoding="unicode") for c in elem]
-            elev_val = 0.0
-            if "elevationStart" in elem.attrib:
-                elev_val = float(elem.attrib["elevationStart"])
-            elif "elevation" in elem.attrib:
-                elev_val = float(elem.attrib["elevation"])
+            e_start = float(elem.attrib.get("elevationStart", elem.attrib.get("elevation", 0.0)))
+            e_end = float(elem.attrib.get("elevationEnd", e_start))
             model.add_dimension(
                 dimension_id=elem.attrib.get("id"),
                 x_start=float(elem.attrib.get("xStart", 0.0)),
@@ -2007,7 +2157,8 @@ class HomeModel:
                 y_end=float(elem.attrib.get("yEnd", 0.0)),
                 offset_cm=float(elem.attrib.get("offset", 30.0)),
                 level_id=elem.attrib.get("level", "level1"),
-                elevation_cm=elev_val,
+                elevation_start_cm=e_start,
+                elevation_end_cm=e_end,
                 extra_attribs=extra_attribs,
                 extra_children=extra_children,
             )
