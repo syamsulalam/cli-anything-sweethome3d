@@ -31,11 +31,12 @@ class Furniture:
 
     def __init__(self, furniture_id, name, catalog_id="custom", x_cm=0.0, y_cm=0.0, elevation_cm=0.0,
                  width_cm=None, depth_cm=None, height_cm=None, angle_deg=0.0, level_id="level1",
-                 extra_attribs=None, extra_children=None):
+                 room_id=None, extra_attribs=None, extra_children=None):
         self.id = str(furniture_id)
         self.catalog_id = str(catalog_id)
         self.extra_attribs = dict(extra_attribs) if extra_attribs else {}
         self.extra_children = list(extra_children) if extra_children else []
+        self.room_id = str(room_id) if room_id else (self.extra_attribs.get("room_id") or self.extra_attribs.get("room"))
         
         # Check catalog presets for default dimensions
         preset = FURNITURE_CATALOG.get(self.catalog_id)
@@ -81,6 +82,7 @@ class Furniture:
             "height_cm": self.height_cm,
             "angle_deg": self.angle_deg,
             "level_id": self.level_id,
+            "room_id": self.room_id,
             "extra_attribs": self.extra_attribs,
             "extra_children": self.extra_children,
         }
@@ -99,6 +101,7 @@ class Furniture:
             height_cm=d.get("height_cm"),
             angle_deg=d.get("angle_deg", 0.0),
             level_id=d.get("level_id", "level1"),
+            room_id=d.get("room_id"),
             extra_attribs=d.get("extra_attribs"),
             extra_children=d.get("extra_children"),
         )

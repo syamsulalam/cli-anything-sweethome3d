@@ -21,15 +21,102 @@ class RecoveryRequiredError(RuntimeError):
 def _calc_sha256(path):
     if not path or not os.path.exists(path):
         return None
-    try:
-        import hashlib
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            while chunk := f.read(65536):
-                h.update(chunk)
-        return h.hexdigest()
-    except Exception:
-        return None
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+def _validate_journal_schema(rec):
+    """Validates that a journal dictionary conforms strictly to the recovery schema (PAC-1 S01)."""
+    if not isinstance(rec, dict):
+        return False
+    req_keys = ["tx_id", "target", "staged_session", "target_revision", "expected_revision"]
+    for k in req_keys:
+        if k not in rec or rec[k] is None:
+            return False
+    if not isinstance(rec["tx_id"], str) or not rec["tx_id"].strip():
+        return False
+    if not isinstance(rec["target"], str) or not rec["target"].strip():
+        return False
+    if not isinstance(rec["staged_session"], str) or not rec["staged_session"].strip():
+        return False
+    if not isinstance(rec["target_revision"], int) or not isinstance(rec["expected_revision"], int):
+        return False
+    if rec["target_revision"] <= rec["expected_revision"]:
+        return False
+    return True
+
+def _rollback_to_base(rec):
+    """Rolls back an incomplete transaction to verified base state (PAC-1 S05).
+    
+    Guarantees that a corrupted backup is NEVER restored over a valid base artifact,
+    and returns False (fail closed) if verified base cannot be proven.
+    """
+    target = rec["target"]
+    backup = rec.get("backup")
+    had_target = rec.get("had_target", False)
+    base_art_sha = rec.get("base_artifact_sha256")
+    tmp_target = rec.get("tmp_target")
+    staged_session = rec.get("staged_session")
+
+    # Clean up uncommitted candidate stages
+    if staged_session and os.path.exists(staged_session):
+        try:
+            os.remove(staged_session)
+        except OSError:
+            pass
+    if tmp_target and os.path.exists(tmp_target):
+        try:
+            os.remove(tmp_target)
+        except OSError:
+            pass
+
+    if had_target:
+        target_sha = None
+        if os.path.exists(target):
+            try:
+                target_sha = _calc_sha256(target)
+            except Exception:
+                target_sha = None
+
+        # Check if target is already the verified base
+        if base_art_sha and target_sha == base_art_sha:
+            if backup and os.path.exists(backup):
+                try:
+                    os.remove(backup)
+                except OSError:
+                    pass
+            return True
+
+        # Target was damaged or replaced; we must restore from backup
+        if not backup or not os.path.exists(backup):
+            return False
+
+        try:
+            backup_sha = _calc_sha256(backup)
+        except Exception:
+            return False
+
+        if base_art_sha and backup_sha != base_art_sha:
+            # Backup is corrupted! Fail closed without destroying target evidence!
+            return False
+
+        # Backup is verified matching base: restore target
+        try:
+            os.replace(backup, target)
+            return True
+        except Exception:
+            return False
+    else:
+        # File was newly created in this transaction; rollback means removing target
+        if target and os.path.exists(target):
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+        return True
 
 def _reconcile_pending(filepath):
     """Reconciles incomplete two-phase commits if a process crashed during persistence.
@@ -44,6 +131,10 @@ def _reconcile_pending(filepath):
             rec = json.load(pf)
     except Exception:
         # Corrupt journal: preserve evidence for inspection, do NOT delete pending file
+        return
+
+    # S01: Journal schema validation (reject empty `{}` or malformed dictionaries)
+    if not _validate_journal_schema(rec):
         return
 
     target = rec.get("target")
@@ -87,8 +178,18 @@ def _reconcile_pending(filepath):
 
     # Scenario 2: Candidate session is staged on disk
     elif staged_session and os.path.exists(staged_session):
-        target_sha = _calc_sha256(target) if (target and os.path.exists(target)) else None
-        tmp_target_sha = _calc_sha256(tmp_target) if (tmp_target and os.path.exists(tmp_target)) else None
+        target_sha = None
+        tmp_target_sha = None
+        if target and os.path.exists(target):
+            try:
+                target_sha = _calc_sha256(target)
+            except Exception:
+                target_sha = None
+        if tmp_target and os.path.exists(tmp_target):
+            try:
+                tmp_target_sha = _calc_sha256(tmp_target)
+            except Exception:
+                tmp_target_sha = None
 
         artifact_ready = False
         if cand_art_sha and target_sha == cand_art_sha:
@@ -116,44 +217,11 @@ def _reconcile_pending(filepath):
                 reconciled = False
         else:
             # Candidate artifact could not be completed. We MUST roll back both session and artifact to base!
-            try:
-                if os.path.exists(staged_session):
-                    os.remove(staged_session)
-                if tmp_target and os.path.exists(tmp_target):
-                    os.remove(tmp_target)
-                if had_target and backup and os.path.exists(backup):
-                    os.replace(backup, target)
-                elif not had_target and target and os.path.exists(target):
-                    os.remove(target)
-                if backup and os.path.exists(backup):
-                    try:
-                        os.remove(backup)
-                    except OSError:
-                        pass
-                reconciled = True
-            except Exception:
-                reconciled = False
+            reconciled = _rollback_to_base(rec)
 
     # Scenario 3: Staged session does not exist (roll back to base)
     else:
-        try:
-            if had_target and backup and os.path.exists(backup):
-                os.replace(backup, target)
-            elif not had_target and target and os.path.exists(target):
-                os.remove(target)
-            if backup and os.path.exists(backup):
-                try:
-                    os.remove(backup)
-                except OSError:
-                    pass
-            if tmp_target and os.path.exists(tmp_target):
-                try:
-                    os.remove(tmp_target)
-                except OSError:
-                    pass
-            reconciled = True
-        except Exception:
-            reconciled = False
+        reconciled = _rollback_to_base(rec)
 
     if reconciled:
         try:
@@ -296,6 +364,7 @@ def _locked_save_json(filepath, data, expected_revision=None, timeout_sec=5.0, p
 
             # Step 2: Write pending intent record atomically (FAIL CLOSED)
             pending_record = {
+                "schema_version": 1,
                 "tx_id": tx_id,
                 "target": art_target,
                 "tmp_target": art_tmp,

@@ -14,7 +14,7 @@ from cli_anything.sweethome3d.core.opening import Opening
 from cli_anything.sweethome3d.core.furniture import Furniture, FURNITURE_CATALOG
 from cli_anything.sweethome3d.core.dimension import DimensionLine
 from cli_anything.sweethome3d.core.project import HomeModel
-from cli_anything.sweethome3d.core.session import SessionManager, _locked_save_json, ConcurrencyConflictError, RecoveryRequiredError
+from cli_anything.sweethome3d.core.session import SessionManager, _locked_save_json, _calc_sha256, ConcurrencyConflictError, RecoveryRequiredError
 from cli_anything.sweethome3d.core.export import export_html, export_svg, calculate_bounds
 
 def test_wall_properties():
@@ -1060,6 +1060,156 @@ def test_unresolved_recovery_blocks_subsequent_writes():
         # Verify session state was not overwritten
         disk_data = json.loads(Path(state).read_text())
         assert disk_data["model"]["name"] == "base"
+
+def test_empty_journal_schema_rejection():
+    """Gate S01: Empty `{}` or invalid schema journals must fail closed and preserve evidence."""
+    with tempfile.TemporaryDirectory() as td:
+        state = str(Path(td) / "session.json")
+        m = SessionManager(state)
+        m.new_project("base")
+        m.save_session()
+        
+        pending_file = state + ".pending"
+        with open(pending_file, "w", encoding="utf-8") as f:
+            f.write("{}")
+            
+        m2 = SessionManager(state)
+        with pytest.raises(RecoveryRequiredError):
+            m2.new_project("should_fail")
+            
+        # Verify journal `{}` was NOT deleted and was preserved!
+        assert os.path.exists(pending_file)
+        # Verify session state was not overwritten
+        disk_data = json.loads(Path(state).read_text())
+        assert disk_data["model"]["name"] == "base"
+
+def test_corrupted_backup_fails_closed():
+    """Gate S05: If candidate stage is absent and backup is corrupted, recovery must fail closed."""
+    with tempfile.TemporaryDirectory() as td:
+        state = str(Path(td) / "session.json")
+        target = str(Path(td) / "home.json")
+        m = SessionManager(state)
+        m.new_project("base")
+        m.save_file(target)
+        
+        base_sha = _calc_sha256(target)
+        
+        # Corrupt target and create a corrupted backup
+        backup_file = target + ".bak_corrupt"
+        with open(backup_file, "w", encoding="utf-8") as f:
+            f.write('{"corrupted": "backup"}')
+            
+        # Write journal pointing to corrupt backup and base_sha
+        pending_file = state + ".pending"
+        with open(pending_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "schema_version": 1,
+                "tx_id": "tx_test",
+                "target": target,
+                "tmp_target": target + ".tmp_none",
+                "candidate_artifact_sha256": "fake_candidate_hash",
+                "base_artifact_sha256": base_sha,
+                "backup": backup_file,
+                "had_target": True,
+                "staged_session": state + ".tmp_none",
+                "expected_revision": 2,
+                "target_revision": 3
+            }, f)
+            
+        # Modify target so it does NOT match base_sha
+        with open(target, "w", encoding="utf-8") as f:
+            f.write('{"modified": true}')
+            
+        # Recovery cannot verify candidate OR backup: must fail closed without deleting journal
+        m2 = SessionManager(state)
+        with pytest.raises(RecoveryRequiredError):
+            m2.new_project("blocked")
+            
+        assert os.path.exists(pending_file)
+        assert os.path.exists(backup_file)
+
+def test_adjacent_rooms_shared_topology_and_golden_quantities():
+    """Gate T01 & T08: Two adjacent 3x3m rooms yield 7 unique physical walls (21m) and golden quantities."""
+    model = HomeModel("PAC1 Golden Fixture", wall_height=280.0)
+    # Room 1: [0, 300] x [0, 300] cm
+    r1 = model.add_room("room1", "Living", [(0, 0), (300, 0), (300, 300), (0, 300)], with_walls=True, wall_thickness=15.0)
+    # Room 2: [300, 600] x [0, 300] cm (shares boundary x=300 from y=0 to 300)
+    r2 = model.add_room("room2", "Dining", [(300, 0), (600, 0), (600, 300), (300, 300)], with_walls=True, wall_thickness=15.0)
+    
+    # Gate T01 check: exactly 7 physical wall atoms!
+    assert len(model.walls) == 7, f"Expected 7 walls, got {len(model.walls)}: {list(model.walls.keys())}"
+    assert model.total_wall_length_m == 21.0, f"Expected 21m total wall length, got {model.total_wall_length_m}"
+
+    # Add shared interior door (1m x 2.1m = 100cm x 210cm) on the shared wall
+    shared_wall = None
+    for wid, w in model.walls.items():
+        if abs(w.x_start - 300.0) < 1.0 and abs(w.x_end - 300.0) < 1.0:
+            shared_wall = wid
+            break
+    assert shared_wall is not None
+    model.add_opening("d_shared", "Shared Door", wall_id=shared_wall, offset_cm=100.0, width_cm=100.0, height_cm=210.0)
+
+    # Gate T08 Golden Quantities Check:
+    takeoff = model.takeoff()
+    summary = takeoff["summary"]
+    # Reference skirting before door deduction: 24m. After 2-face door deduction (2x1m): 22m!
+    assert summary["reference_skirting_length_m"] == 22.0
+    assert summary["skirting_length_m"] == 22.0
+    # Inside clear-face skirting after door deduction: 20.8m!
+    assert summary["clear_face_skirting_length_m"] == 20.8
+    # Clear usable room cores: 2 x 2.85^2 = 16.245 m2!
+    assert summary["clear_core_area_m2"] == 16.245
+
+def test_furniture_wall_collision_and_door_cutout():
+    """Gate C03 & C04: Furniture penetrating wall material triggers error; doorway cutout allows passage."""
+    model = HomeModel("Wall Collision Test", wall_height=280.0)
+    w = model.add_wall("w1", 0, 0, 500, 0, thickness=20.0, height=280.0)
+    # Furniture 100x100cm centered at (250, 0) directly overlapping the wall
+    f1 = model.add_furniture("f1", "Table Overlap", x_cm=250.0, y_cm=0.0, width_cm=100.0, depth_cm=100.0, height_cm=75.0)
+    val = model.validate()
+    assert any(f["code"] == "FURNITURE_WALL_COLLISION" for f in val["findings"])
+
+    # Now add a door at offset 200 (width 100cm covers x=200 to 300) from elevation 0 to 210cm
+    model.add_opening("d1", "Passage Door", wall_id="w1", offset_cm=200.0, width_cm=100.0, height_cm=210.0)
+    val_after_door = model.validate()
+    # In the doorway cutout, wall material is removed, so furniture in doorway is permitted!
+    assert not any(f["code"] == "FURNITURE_WALL_COLLISION" for f in val_after_door["findings"])
+
+def test_furniture_outside_room_containment():
+    """Gate C05: Furniture extending outside assigned room triggers FURNITURE_OUTSIDE_ROOM."""
+    model = HomeModel("Room Containment Test")
+    model.add_room("r1", "Bedroom", [(0, 0), (400, 0), (400, 400), (0, 400)])
+    # Furniture centered at (380, 200) with width 100cm extends outside x=400
+    f = model.add_furniture("bed", "Bed", x_cm=380.0, y_cm=200.0, width_cm=100.0, depth_cm=100.0, height_cm=80.0, room_id="r1")
+    val = model.validate()
+    assert any(f["code"] == "FURNITURE_OUTSIDE_ROOM" for f in val["findings"])
+
+def test_native_wire_v7400_colors_and_arc_radians():
+    """Gate N01 & N03: XML exports version 7400, 8-hex colors without #, and signed radian wall arcExtent."""
+    model = HomeModel("Wire Format Test", version="7.5")
+    model.add_wall("w_arc", 0, 0, 400, 0, arc_extent=90.0)
+    model.add_room("r1", "Living", [(0, 0), (400, 0), (400, 400), (0, 400)], floor_color="#EAEAEA")
+    
+    xml = model.to_xml()
+    root = ET.fromstring(xml)
+    # Gate N01: integer version 7400
+    assert root.attrib.get("version") == "7400"
+    
+    # Gate N03: Room color formatted as 8 hex digits without `#` (00EAEAEA)
+    room_elem = root.find("room")
+    assert room_elem.attrib.get("floorColor") == "00EAEAEA"
+    
+    # Gate N03: Wall arcExtent exported as signed radians: -radians(90) = -pi/2 ~= -1.570796
+    wall_elem = root.find("wall")
+    assert float(wall_elem.attrib.get("arcExtent")) < 0.0
+    assert round(float(wall_elem.attrib.get("arcExtent")), 4) == round(-math.radians(90.0), 4)
+
+    # Roundtrip check: parsing XML restores internal values
+    m_parsed = HomeModel.from_xml(xml)
+    assert m_parsed.rooms["r1"].floor_color == "#EAEAEA"
+    assert round(m_parsed.walls["w_arc"].arc_extent, 1) == 90.0
+
+
 
 
 
