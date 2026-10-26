@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.7.0 (PAC-1 Contract Iteration 16)  
+**Document Version:** 2.8.0 (PAC-1 Contract Iteration 17)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -130,21 +130,36 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
   - All 4 architectural templates pass validation with 0 errors and 0 warnings. (`✅ Completed`)
 
 ### Phase 11: Sol Round 15 Prescriptions — Deep Model Atomicity, All-Source Provenance & Analytic Circle Interval Union (PAC-1 Iteration 16)
-- [ ] **R15-P1-01: Full Direct API Atomicity & Deep Rollback**:
+- [x] **R15-P1-01: Full Direct API Atomicity & Deep Rollback**:
   - Snapshot complete opening state and attributes before noding mutations.
   - In exception handler, restore every opening in-place (`wall_id`, `offset_cm`, `x_cm`, `y_cm`, `angle_deg`) and restore `self.walls = orig_walls`.
-  - Guarantee `m.to_dict() == before` when late-level conflicts occur. (`🔄 In Progress`)
-- [ ] **R15-P1-02: All-Source Metadata & Native Children Provenance Merge**:
+  - Guarantee `m.to_dict() == before` when late-level conflicts occur. (`✅ Completed`)
+- [x] **R15-P1-02: All-Source Metadata & Native Children Provenance Merge**:
   - On accepted wall merges, merge complementary face colors across sources after orientation normalization (e.g. `base_w` leftSideColor + `other` rightSideColor).
-  - Union unique `extra_children` across all source walls. Reject conflicting named properties before mutation. (`🔄 In Progress`)
-- [ ] **R15-P1-03: Analytic Circular Interval Union & Scale-Dependent Distinction**:
+  - Union unique `extra_children` across all source walls. Reject conflicting named properties before mutation. (`✅ Completed`)
+- [x] **R15-P1-03: Analytic Circular Interval Union & Scale-Dependent Distinction**:
   - Compute circle center $(cx, cy)$ and radius $R$ analytically for curved walls.
   - Group curved walls by circle identity within physical budget ($\Delta\text{center} \le 0.01\text{ cm}$, $\Delta R \le 0.01\text{ cm}$).
   - Compute 1D angular interval union on $[0, 2\pi)$ for partial overlapping arcs (90° arc + 45° half yields exact 4.44m).
   - Distinguish measurably different sweeps (400m chord with 90° vs 90.004° midpoints differ by ~0.41cm, distinct circles).
-  - Reuse unified implementation in both `total_noded_wall_length_m` and `get_noded_wall_segments()`. (`🔄 In Progress`)
-- [ ] **Consult Critic on Full 10.0 Roadmap**:
-  - Prompt Sol via Herdr with Syamsul's direct question: provide exact technical requirements and implementation details necessary to achieve 10.0 across all vectors (especially Sweet Home 3D interoperability). (`⏳ Pending`)
+  - Reuse unified implementation in both `total_noded_wall_length_m` and `get_noded_wall_segments()`. (`✅ Completed`)
+
+### Phase 12: Sol Round 16 Prescriptions — Native Wire Ordering, Full Precision, Closed Circle Split & Versioned Envelope (PAC-1 Iteration 17)
+- [x] **R16-P1-01: Semantic Metadata Union & Normalized Side-Specific Reversal**:
+  - Reversible side properties (`leftSideColor` ↔ `rightSideColor`, `leftSideShininess`, `leftSideTexture`, `leftSideBaseboard`).
+  - Coalesce identical `<property>` tags and fail-fast with atomic rollback on conflicting values. (`✅ Completed`)
+- [x] **R16-P1-02: Closed Circle Split & Unified Error Budget**:
+  - 360° closed circles split into two nondegenerate 180° supported arcs.
+  - Circle grouping uses combined radial error budget `dist_c + diff_r <= epsilon`. (`✅ Completed`)
+- [x] **R16-P1-03: Native Sweet Home 3D XML Wire Sequence & Clean DTD**:
+  - Sequence: `level*` → `(pieceOfFurniture | doorOrWindow)*` → `wall*` → `room*` → `dimensionLine*`.
+  - Purged non-native `area` from `<room>` and replaced custom `elevation` in `<dimensionLine>` with native `elevationStart`/`elevationEnd`.
+  - Preserved full float angle precision (no 1-decimal truncation).
+  - Excluded stale binary `Home` zip payload during saving. (`✅ Completed`)
+- [x] **R16-P1-04: Agent-Native Ergonomics Protocol Envelope (Gate A04)**:
+  - Versioned JSON envelope (`protocol_version: "1"`, `status: "success"`, `outcome: "ok"`). (`✅ Completed`)
+- [x] **Reconciled Test Suite**:
+  - 123 tests passing in 7.68s (119 core + 4 E2E). (`✅ Completed`)
 
 
 

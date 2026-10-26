@@ -157,10 +157,23 @@ def safe_publish_export(output_path, generator_fn):
 
 
 def output_result(ctx, data, human_formatter=None):
-    """Outputs data either as JSON or human-readable format based on context flag."""
+    """Outputs data either as JSON or human-readable format based on context flag (PAC-1 A04)."""
     is_json = ctx.obj.get("json", False) if ctx.obj else False
     if is_json:
-        click.echo(json.dumps({"status": "success", "data": data}, indent=2))
+        # PAC-1 A04, R16-P1-04: Versioned finite JSON envelope
+        payload = {
+            "protocol_version": "1",
+            "status": "success",
+            "outcome": "ok",
+            "project": {
+                "name": session_mgr.model.name if session_mgr.model else None,
+                "active_file": session_mgr.active_file,
+                "revision": getattr(session_mgr, "revision", 0),
+            },
+            "data": data,
+            "error": None
+        }
+        click.echo(json.dumps(payload, indent=2))
     elif human_formatter:
         human_formatter(data)
     elif isinstance(data, (dict, list)):

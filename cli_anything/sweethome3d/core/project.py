@@ -63,7 +63,7 @@ def _compute_unique_curved_runs(lvl_walls, epsilon=0.01):
         for g in groups:
             dist_c = math.hypot(g["cx"] - cx, g["cy"] - cy)
             diff_r = abs(g["r"] - r)
-            if dist_c <= epsilon and diff_r <= epsilon:
+            if (dist_c + diff_r) <= epsilon:
                 g["walls"].append(w)
                 matched = True
                 break
@@ -114,7 +114,7 @@ def _compute_unique_curved_runs(lvl_walls, epsilon=0.01):
             seg_len = r * seg_angle
             total_length_cm += seg_len
 
-            if len(g["walls"]) == 1:
+            if len(g["walls"]) == 1 and abs(seg_angle - TWO_PI) >= 1e-4:
                 orig_w = g["walls"][0]
                 unique_segments.append({
                     "x_start": round(orig_w.x_start, 2),
@@ -127,6 +127,28 @@ def _compute_unique_curved_runs(lvl_walls, epsilon=0.01):
                     "level_id": orig_w.level_id,
                     "wall_id": orig_w.id,
                 })
+            elif abs(seg_angle - TWO_PI) < 1e-4:
+                # PAC-1 T05, T09, E08, R16-P1-02: Split full 360° closed circle into two nondegenerate 180° supported arcs
+                for half_idx in (0, 1):
+                    phi_s = (a + half_idx * math.pi) % TWO_PI
+                    phi_e = (phi_s + math.pi) % TWO_PI
+                    xs = cx + r * math.cos(phi_e if rep_w.arc_extent > 0 else phi_s)
+                    ys = cy + r * math.sin(phi_e if rep_w.arc_extent > 0 else phi_s)
+                    xe = cx + r * math.cos(phi_s if rep_w.arc_extent > 0 else phi_e)
+                    ye = cy + r * math.sin(phi_s if rep_w.arc_extent > 0 else phi_e)
+                    half_len = r * math.pi
+                    extent_deg = 180.0 if rep_w.arc_extent > 0 else -180.0
+                    unique_segments.append({
+                        "x_start": round(xs, 2),
+                        "y_start": round(ys, 2),
+                        "x_end": round(xe, 2),
+                        "y_end": round(ye, 2),
+                        "length_m": round(half_len / 100.0, 3),
+                        "arc_extent": extent_deg,
+                        "is_curved": True,
+                        "level_id": rep_w.level_id,
+                        "wall_id": f"{rep_w.id}_arc{half_idx+1}",
+                    })
             else:
                 phi_s = a % TWO_PI
                 phi_e = b % TWO_PI
@@ -576,37 +598,74 @@ class HomeModel:
                         # Compare and merge face intent in normalized physical orientation
                         dx2, dy2 = other.x_end - other.x_start, other.y_end - other.y_start
                         aligned = (dx1 * dx2 + dy1 * dy2) > 0
-                        if aligned:
-                            other_left = other.extra_attribs.get('leftSideColor')
-                            other_right = other.extra_attribs.get('rightSideColor')
-                        else:
-                            other_left = other.extra_attribs.get('rightSideColor')
-                            other_right = other.extra_attribs.get('leftSideColor')
 
-                        curr_left = merged_attribs.get('leftSideColor')
-                        curr_right = merged_attribs.get('rightSideColor')
+                        SIDE_PAIRS = [
+                            ('leftSideColor', 'rightSideColor'),
+                            ('leftSideShininess', 'rightSideShininess'),
+                            ('leftSideTexture', 'rightSideTexture'),
+                            ('leftSideBaseboard', 'rightSideBaseboard'),
+                        ]
+                        side_keys = set()
+                        for left_k, right_k in SIDE_PAIRS:
+                            side_keys.add(left_k)
+                            side_keys.add(right_k)
+                            if aligned:
+                                other_l = other.extra_attribs.get(left_k)
+                                other_r = other.extra_attribs.get(right_k)
+                            else:
+                                other_l = other.extra_attribs.get(right_k)
+                                other_r = other.extra_attribs.get(left_k)
 
-                        if curr_left and other_left and curr_left != other_left:
-                            raise ValueError(f"Conflicting wall face color/material intent on overlapping segment between {base_w.id} and {other.id}")
-                        if curr_right and other_right and curr_right != other_right:
-                            raise ValueError(f"Conflicting wall face color/material intent on overlapping segment between {base_w.id} and {other.id}")
+                            curr_l = merged_attribs.get(left_k)
+                            curr_r = merged_attribs.get(right_k)
 
-                        if other_left:
-                            merged_attribs['leftSideColor'] = other_left
-                        if other_right:
-                            merged_attribs['rightSideColor'] = other_right
+                            if curr_l and other_l and curr_l != other_l:
+                                raise ValueError(f"Conflicting wall face color/material intent ('{left_k}') on overlapping segment between {base_w.id} and {other.id}")
+                            if curr_r and other_r and curr_r != other_r:
+                                raise ValueError(f"Conflicting wall face color/material intent ('{right_k}') on overlapping segment between {base_w.id} and {other.id}")
 
-                        # Merge other non-color attributes
+                            if other_l:
+                                merged_attribs[left_k] = other_l
+                            if other_r:
+                                merged_attribs[right_k] = other_r
+
+                        # Merge other non-side-specific attributes
                         for k, v in other.extra_attribs.items():
-                            if k not in ('leftSideColor', 'rightSideColor'):
+                            if k not in side_keys:
                                 if k in merged_attribs and merged_attribs[k] != v:
                                     raise ValueError(f"Conflicting attribute '{k}' on overlapping segment between {base_w.id} and {other.id}")
                                 merged_attribs[k] = v
 
-                        # Merge unique extra children
+                        # PAC-1 T04, T06, N09, R16-P1-01: Merge extra children with semantic property validation
+                        def _extract_prop_name_val(child_str):
+                            try:
+                                elem = ET.fromstring(child_str) if isinstance(child_str, str) else child_str
+                                if elem.tag == "property" and "name" in elem.attrib:
+                                    return elem.attrib["name"], elem.attrib.get("value")
+                            except Exception:
+                                pass
+                            return None
+
+                        prop_map = {}
+                        for ch in merged_children:
+                            info = _extract_prop_name_val(ch)
+                            if info:
+                                prop_map[info[0]] = info[1]
+
                         for child in other.extra_children:
-                            if child not in merged_children:
-                                merged_children.append(child)
+                            info = _extract_prop_name_val(child)
+                            if info:
+                                p_name, p_val = info
+                                if p_name in prop_map:
+                                    if prop_map[p_name] != p_val:
+                                        raise ValueError(f"Conflicting wall property '{p_name}' ('{prop_map[p_name]}' vs '{p_val}') on overlapping segment between {base_w.id} and {other.id}")
+                                    # identical value coalesces, do not duplicate
+                                else:
+                                    prop_map[p_name] = p_val
+                                    merged_children.append(child)
+                            else:
+                                if child not in merged_children:
+                                    merged_children.append(child)
 
                     # Orient atom to match base source wall direction
                     atom_dx, atom_dy = p2[0] - p1[0], p2[1] - p1[1]
@@ -1521,41 +1580,7 @@ class HomeModel:
                 except Exception:
                     pass
 
-        # Walls
-        for w in self.walls.values():
-            wall_attrib = {
-                "id": w.id, "level": w.level_id,
-                "xStart": str(w.x_start), "yStart": str(w.y_start),
-                "xEnd": str(w.x_end), "yEnd": str(w.y_end),
-                "thickness": str(w.thickness), "height": str(w.height),
-            }
-            if abs(w.arc_extent) > 1e-4:
-                # Gate N03: Upstream Sweet Home 3D Java 7.5 models arcExtent in radians with inverted sign relative to +Y bulge
-                native_arc = -math.radians(w.arc_extent)
-                wall_attrib["arcExtent"] = str(native_arc)
-            wall_attrib.update(w.extra_attribs)
-            w_elem = ET.SubElement(root, "wall", **wall_attrib)
-            for raw_child in w.extra_children:
-                try:
-                    w_elem.append(ET.fromstring(raw_child))
-                except Exception:
-                    pass
-
-        # Rooms
-        for r in self.rooms.values():
-            # Gate N03: Format RGB color as 8 hex digits without `#` (e.g. 00EAEAEA)
-            r_attrib = {"id": r.id, "level": r.level_id, "name": r.name,
-                        "area": str(r.area_m2), "floorColor": _format_native_color(r.floor_color)}
-            r_attrib.update(r.extra_attribs)
-            room_elem = ET.SubElement(root, "room", **r_attrib)
-            for p in r.points:
-                ET.SubElement(room_elem, "point", x=str(p[0]), y=str(p[1]))
-            for raw_child in r.extra_children:
-                try:
-                    room_elem.append(ET.fromstring(raw_child))
-                except Exception:
-                    pass
-
+        # PAC-1 N02: Official Sweet Home 3D wire sequence mandates furniture/openings BEFORE walls/rooms
         # Openings (doors and windows, emitting native spatial coordinates + wall references)
         for op in self.openings.values():
             wall = self.walls.get(op.wall_id) if op.wall_id else None
@@ -1619,13 +1644,50 @@ class HomeModel:
                 except Exception:
                     pass
 
-        # Dimensions
+        # Walls
+        for w in self.walls.values():
+            wall_attrib = {
+                "id": w.id, "level": w.level_id,
+                "xStart": str(w.x_start), "yStart": str(w.y_start),
+                "xEnd": str(w.x_end), "yEnd": str(w.y_end),
+                "thickness": str(w.thickness), "height": str(w.height),
+            }
+            if abs(w.arc_extent) > 1e-4:
+                # Gate N03: Upstream Sweet Home 3D Java 7.5 models arcExtent in radians with inverted sign relative to +Y bulge
+                native_arc = -math.radians(w.arc_extent)
+                wall_attrib["arcExtent"] = str(native_arc)
+            wall_attrib.update(w.extra_attribs)
+            w_elem = ET.SubElement(root, "wall", **wall_attrib)
+            for raw_child in w.extra_children:
+                try:
+                    w_elem.append(ET.fromstring(raw_child))
+                except Exception:
+                    pass
+
+        # Rooms
+        for r in self.rooms.values():
+            # Gate N03: Format RGB color as 8 hex digits without `#`; omit custom 'area' attribute
+            r_attrib = {"id": r.id, "level": r.level_id, "name": r.name,
+                        "floorColor": _format_native_color(r.floor_color)}
+            r_attrib.update(r.extra_attribs)
+            room_elem = ET.SubElement(root, "room", **r_attrib)
+            for p in r.points:
+                ET.SubElement(room_elem, "point", x=str(p[0]), y=str(p[1]))
+            for raw_child in r.extra_children:
+                try:
+                    room_elem.append(ET.fromstring(raw_child))
+                except Exception:
+                    pass
+
+        # Dimensions (PAC-1 N02: elevationStart and elevationEnd)
         for dim in self.dimensions.values():
             d_attrib = {
                 "id": dim.id, "level": dim.level_id,
                 "xStart": str(dim.x_start), "yStart": str(dim.y_start),
                 "xEnd": str(dim.x_end), "yEnd": str(dim.y_end),
-                "offset": str(dim.offset_cm), "elevation": str(dim.elevation_cm)
+                "offset": str(dim.offset_cm),
+                "elevationStart": str(dim.elevation_cm),
+                "elevationEnd": str(dim.elevation_cm),
             }
             d_attrib.update(dim.extra_attribs)
             d_elem = ET.SubElement(root, "dimensionLine", **d_attrib)
@@ -1766,12 +1828,11 @@ class HomeModel:
             angle_deg = None
             if "angle" in elem.attrib:
                 angle_raw = float(elem.attrib["angle"])
-                # Sweet Home 3D XML spec defines 'angle' in radians.
-                # If magnitude exceeds 2π, assume non-standard degree encoding.
+                # PAC-1 N03, R16-P1-03: Full float precision preservation (no 1-decimal truncation)
                 if abs(angle_raw) > 2 * math.pi:
-                    angle_deg = round(angle_raw % 360.0, 1)
+                    angle_deg = round(angle_raw % 360.0, 6)
                 else:
-                    angle_deg = round(math.degrees(angle_raw) % 360.0, 1)
+                    angle_deg = round(math.degrees(angle_raw) % 360.0, 6)
             level_id = elem.attrib.get("level", "level1")
 
             offset_cm = None
@@ -1834,12 +1895,11 @@ class HomeModel:
             extra_children = [ET.tostring(c, encoding="unicode") for c in elem]
 
             angle_raw = float(elem.attrib.get("angle", 0.0))
-            # Sweet Home 3D XML spec defines 'angle' in radians.
-            # If magnitude exceeds 2π, assume non-standard degree encoding.
+            # PAC-1 N03, R16-P1-03: Full float precision preservation (no 1-decimal truncation)
             if abs(angle_raw) > 2 * math.pi:
-                angle_deg = round(angle_raw % 360.0, 1)
+                angle_deg = round(angle_raw % 360.0, 6)
             else:
-                angle_deg = round(math.degrees(angle_raw) % 360.0, 1)
+                angle_deg = round(math.degrees(angle_raw) % 360.0, 6)
 
             model.add_furniture(
                 furniture_id=elem.attrib.get("id"),
@@ -1885,7 +1945,8 @@ class HomeModel:
         with zipfile.ZipFile(tmp_target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("Home.xml", xml_content)
             for fname, data_bytes in self.extra_zip_entries.items():
-                if fname != "Home.xml":
+                # PAC-1 N08, R16-P1-03: Stale alternate guard; do not write stale binary Home next to new Home.xml
+                if fname not in ("Home.xml", "Home"):
                     zf.writestr(fname, data_bytes)
         os.replace(tmp_target, filepath)
         return filepath

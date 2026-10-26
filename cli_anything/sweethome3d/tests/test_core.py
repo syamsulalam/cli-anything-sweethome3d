@@ -2281,6 +2281,147 @@ def test_curved_wall_different_sweeps_not_collapsed():
     assert len(curved_atoms) == 2
 
 
+def test_semantic_noding_property_coalescence_and_conflict_rejection():
+    """PAC-1 T04, T06, N09, R16-P1-01: Conflicting properties refuse atomically; duplicate identical coalesce."""
+    # 1. Identical duplicate coalesces
+    m_same = HomeModel("Identical Property Coalesce")
+    m_same.add_wall("w1", 0, 0, 300, 0, extra_children=['<property name="finish-spec" value="oak"/>'])
+    m_same.add_wall("w2", 0, 0, 300, 0, extra_children=['<property name="finish-spec" value="oak"/>'])
+    m_same.node_walls()
+    assert len(m_same.walls) == 1
+    w = next(iter(m_same.walls.values()))
+    prop_children = [c for c in w.extra_children if 'name="finish-spec"' in c]
+    assert len(prop_children) == 1, f"Expected 1 coalesced property, got {len(prop_children)}"
+
+    # 2. Conflicting property values must raise ValueError and roll back
+    m_diff = HomeModel("Conflicting Property Refusal")
+    m_diff.add_wall("w1", 0, 0, 300, 0, extra_children=['<property name="finish-spec" value="oak"/>'])
+    m_diff.add_wall("w2", 0, 0, 300, 0, extra_children=['<property name="finish-spec" value="tile"/>'])
+    before_diff = m_diff.to_dict()
+    with pytest.raises(ValueError, match="Conflicting wall property 'finish-spec'"):
+        m_diff.node_walls()
+    assert m_diff.to_dict() == before_diff, "Conflicting property failure must roll back model completely!"
+
+
+def test_semantic_noding_antiparallel_normalizes_shininess_texture_baseboard():
+    """PAC-1 T04, T06, N09, R16-P1-01: Antiparallel sources swap leftSideShininess/texture/baseboard to physical face."""
+    m = HomeModel("Antiparallel Shininess & Side Roles")
+    m.add_wall("a", 0, 0, 300, 0, extra_attribs={"leftSideColor": "00FFFFFF"})
+    # Reversed wall with leftSideShininess="0.9" (which is physically on the right side of wall a)
+    m.add_wall("b", 300, 0, 0, 0, extra_attribs={
+        "leftSideShininess": "0.9",
+        "leftSideTexture": "tex_wood",
+        "leftSideBaseboard": "bb_moulding"
+    })
+    m.node_walls()
+    assert len(m.walls) == 1
+    w = next(iter(m.walls.values()))
+    assert w.extra_attribs.get("leftSideColor") == "00FFFFFF"
+    assert w.extra_attribs.get("rightSideShininess") == "0.9"
+    assert w.extra_attribs.get("rightSideTexture") == "tex_wood"
+    assert w.extra_attribs.get("rightSideBaseboard") == "bb_moulding"
+    assert "leftSideShininess" not in w.extra_attribs
+
+
+def test_circular_union_closed_360_circle_splits_into_supported_arcs():
+    """PAC-1 T05, T09, E08, R16-P1-02: Two semicircles unioning to 360 deg split into 2 nondegenerate supported 180 deg arcs."""
+    m = HomeModel("Closed Circle Semicircles")
+    # Semicircle 1: (100, 0) -> (-100, 0) extent 180
+    m.add_wall("semi1", 100, 0, -100, 0, arc_extent=180.0)
+    # Semicircle 2: (-100, 0) -> (100, 0) extent 180
+    m.add_wall("semi2", -100, 0, 100, 0, arc_extent=180.0)
+
+    # Circumference = 2 * pi * 100 = 628.3185 cm = 6.28 m
+    assert m.total_noded_wall_length_m == 6.28
+    segments = m.get_noded_wall_segments()
+    curved_segs = [s for s in segments if s.get("is_curved")]
+    assert len(curved_segs) == 2, f"Expected full circle to split into 2 valid supported 180 deg arcs, got {len(curved_segs)}"
+    for s in curved_segs:
+        assert abs(s["arc_extent"]) == 180.0
+        # Assert nondegenerate chord length (not zero chord)
+        chord = math.hypot(s["x_end"] - s["x_start"], s["y_end"] - s["y_start"])
+        assert chord > 10.0, f"Arc chord must be nondegenerate, got {chord}"
+
+
+def test_circular_union_total_representation_budget_bounds_centers_and_radii():
+    """PAC-1 T05, T09, E08, R16-P1-02: Total error budget distance(C1, C2) + abs(R1 - R2) <= 0.01cm."""
+    from cli_anything.sweethome3d.core.project import _compute_unique_curved_runs
+    w1 = Wall("c1", 100, 0, 0, 100, arc_extent=90.0)
+    # Wall 2: center (0.009, 0), radius 100.009 -> distance(C1,C2)=0.009, diff_R=0.009 -> sum=0.018 > 0.01
+    w2 = Wall("c2", 100.009 + 0.009, 0, 0.009, 100.009, arc_extent=90.0)
+    total_len, segs = _compute_unique_curved_runs([w1, w2], epsilon=0.01)
+    # Since total displacement 0.018 > 0.01, they must not collapse into a single circle
+    assert len(segs) == 2, f"Expected 2 distinct curves under combined 0.01cm budget, got {len(segs)}"
+
+
+def test_native_xml_wire_sequence_and_clean_attributes():
+    """PAC-1 N02, N03, R16-P1-03: Official wire sequence (furniture/openings before walls/rooms) and native attributes."""
+    m = HomeModel("Wire Sequence")
+    m.add_level("lvl1", "Floor", 0.0, 280.0)
+    m.add_wall("w1", 0, 0, 500, 0, level_id="lvl1")
+    m.add_opening("d1", "Door", wall_id="w1", offset_cm=50.0, width_cm=90.0, level_id="lvl1")
+    m.add_furniture("f1", "Chair", x_cm=100.0, y_cm=100.0, level_id="lvl1")
+    m.add_room("r1", "Living Room", [(0, 0), (500, 0), (500, 400), (0, 400)], level_id="lvl1")
+    m.add_dimension("dim1", 0, 0, 500, 0, level_id="lvl1", elevation_cm=27.0)
+
+    xml_out = m.to_xml()
+    root = ET.fromstring(xml_out)
+
+    # 1. Wire child sequence verification
+    child_tags = [c.tag for c in root if c.tag in ("level", "pieceOfFurniture", "doorOrWindow", "wall", "room", "dimensionLine")]
+    # pieceOfFurniture and doorOrWindow must precede wall and room
+    wall_idx = child_tags.index("wall")
+    room_idx = child_tags.index("room")
+    door_idx = child_tags.index("doorOrWindow")
+    furn_idx = child_tags.index("pieceOfFurniture")
+    dim_idx = child_tags.index("dimensionLine")
+
+    assert door_idx < wall_idx, "doorOrWindow must precede wall in native Sweet Home 3D wire sequence"
+    assert furn_idx < wall_idx, "pieceOfFurniture must precede wall in native Sweet Home 3D wire sequence"
+    assert wall_idx < room_idx, "wall must precede room in native Sweet Home 3D wire sequence"
+    assert room_idx < dim_idx, "room must precede dimensionLine in native Sweet Home 3D wire sequence"
+
+    # 2. Room must not contain custom non-native 'area' attribute
+    r_elem = root.find("room")
+    assert "area" not in r_elem.attrib, "Native <room> must not emit custom 'area' attribute"
+
+    # 3. Dimension must emit elevationStart and elevationEnd
+    dim_elem = root.find("dimensionLine")
+    assert dim_elem.get("elevationStart") == "27.0"
+    assert dim_elem.get("elevationEnd") == "27.0"
+
+
+def test_native_furniture_high_precision_angle_preservation():
+    """PAC-1 N03, R16-P1-03: Native furniture import preserves full float precision (12.3456 deg not truncated to 12.3 deg)."""
+    rad = math.radians(12.3456)
+    xml_src = f"""<home version="7400">
+  <level id="level1" name="Ground" elevation="0" height="280" floorThickness="25"/>
+  <pieceOfFurniture id="f" name="Precision Chair" level="level1" x="100" y="100"
+      width="50" depth="50" height="80" angle="{rad}"/>
+</home>"""
+    m = HomeModel.from_xml(xml_src)
+    assert round(m.furniture["f"].angle_deg, 4) == 12.3456, f"Expected 12.3456 deg, got {m.furniture['f'].angle_deg}"
+
+
+def test_sh3d_save_stale_alternate_binary_home_excluded(tmp_path):
+    """PAC-1 N08, R16-P1-03: Mutated archive save does not write stale binary Home entry alongside new Home.xml."""
+    import zipfile
+    archive_path = str(tmp_path / "test_stale_guard.sh3d")
+    m = HomeModel("Stale Guard")
+    m.add_wall("w1", 0, 0, 500, 0)
+    # Simulate an archive that had an old binary 'Home' and an asset texture
+    m.extra_zip_entries["Home"] = b"FAKE_OLD_SERIALIZED_HOME_BINARY"
+    m.extra_zip_entries["textures/wood.png"] = b"PNG_DATA"
+
+    m.save_sh3d(archive_path)
+
+    with zipfile.ZipFile(archive_path, "r") as zf:
+        names = zf.namelist()
+        assert "Home.xml" in names, "Home.xml must be present"
+        assert "textures/wood.png" in names, "Valid resource textures/wood.png must be preserved"
+        assert "Home" not in names, "Stale binary 'Home' entry must NOT be written when saving updated Home.xml"
+
+
 
 
 
