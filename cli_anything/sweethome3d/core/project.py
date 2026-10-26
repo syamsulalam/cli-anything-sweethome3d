@@ -12,6 +12,144 @@ from cli_anything.sweethome3d.core.opening import Opening
 from cli_anything.sweethome3d.core.furniture import Furniture
 from cli_anything.sweethome3d.core.dimension import DimensionLine
 
+
+def _resolve_curved_wall_circle(w):
+    """Analytically calculates circle center (cx, cy) and radius r for a curved wall.
+    
+    Returns (cx, cy, r) or None if wall is straight or degenerate.
+    """
+    if abs(getattr(w, "arc_extent", 0.0)) < 1e-4 or w.chord_length < 1e-6:
+        return None
+    c = w.chord_length
+    theta = math.radians(w.arc_extent)
+    alpha = abs(theta) / 2.0
+    sin_alpha = math.sin(alpha)
+    if abs(sin_alpha) < 1e-6:
+        return None
+    r = c / (2.0 * sin_alpha)
+    h = r * math.cos(alpha)
+    mx = (w.x_start + w.x_end) / 2.0
+    my = (w.y_start + w.y_end) / 2.0
+    nx = -(w.y_end - w.y_start) / c
+    ny = (w.x_end - w.x_start) / c
+    sign = 1.0 if w.arc_extent > 0 else -1.0
+    cx = mx - sign * h * nx
+    cy = my - sign * h * ny
+    return (cx, cy, r)
+
+
+def _compute_unique_curved_runs(lvl_walls, epsilon=0.01):
+    """Computes unique physical curved runs and atoms via analytic circular interval union (PAC-1 T05, T09, E08).
+    
+    Groups curved walls on the same level by circle identity within physical tolerance budget
+    (delta_center <= epsilon, delta_radius <= epsilon), normalizes angular sweep intervals onto [0, 2*pi),
+    and computes 1D interval union, correctly handling partial overlaps, duplicate arcs, and reversed sweeps.
+    """
+    curved_walls = [
+        w for w in lvl_walls
+        if abs(getattr(w, "arc_extent", 0.0)) >= 1e-4 and w.chord_length > 1e-4
+    ]
+    if not curved_walls:
+        return 0.0, []
+
+    TWO_PI = 2.0 * math.pi
+    groups = []
+    for w in curved_walls:
+        circle = _resolve_curved_wall_circle(w)
+        if not circle:
+            continue
+        cx, cy, r = circle
+        matched = False
+        for g in groups:
+            dist_c = math.hypot(g["cx"] - cx, g["cy"] - cy)
+            diff_r = abs(g["r"] - r)
+            if dist_c <= epsilon and diff_r <= epsilon:
+                g["walls"].append(w)
+                matched = True
+                break
+        if not matched:
+            groups.append({"cx": cx, "cy": cy, "r": r, "walls": [w]})
+
+    total_length_cm = 0.0
+    unique_segments = []
+
+    for g in groups:
+        cx, cy, r = g["cx"], g["cy"], g["r"]
+        intervals = []
+        for w in g["walls"]:
+            theta = math.radians(w.arc_extent)
+            phi1 = math.atan2(w.y_start - cy, w.x_start - cx)
+            phi2 = phi1 - theta
+            start_angle = phi2 if theta > 0 else phi1
+            span = abs(theta)
+            start_norm = start_angle % TWO_PI
+            end_norm = start_norm + span
+            if end_norm <= TWO_PI:
+                intervals.append((start_norm, end_norm, w))
+            else:
+                intervals.append((start_norm, TWO_PI, w))
+                intervals.append((0.0, end_norm - TWO_PI, w))
+
+        if not intervals:
+            continue
+
+        intervals.sort(key=lambda x: x[0])
+        merged = []
+        for a, b, w in intervals:
+            if not merged:
+                merged.append([a, b, w])
+            else:
+                if a <= merged[-1][1] + 1e-7:
+                    merged[-1][1] = max(merged[-1][1], b)
+                else:
+                    merged.append([a, b, w])
+
+        if len(merged) > 1 and abs(merged[-1][1] - TWO_PI) < 1e-7 and abs(merged[0][0]) < 1e-7:
+            first = merged.pop(0)
+            merged[-1][1] = TWO_PI + first[1]
+
+        for m_item in merged:
+            a, b, rep_w = m_item[0], m_item[1], m_item[2]
+            seg_angle = min(TWO_PI, b - a)
+            seg_len = r * seg_angle
+            total_length_cm += seg_len
+
+            if len(g["walls"]) == 1:
+                orig_w = g["walls"][0]
+                unique_segments.append({
+                    "x_start": round(orig_w.x_start, 2),
+                    "y_start": round(orig_w.y_start, 2),
+                    "x_end": round(orig_w.x_end, 2),
+                    "y_end": round(orig_w.y_end, 2),
+                    "length_m": round(orig_w.length / 100.0, 3),
+                    "arc_extent": orig_w.arc_extent,
+                    "is_curved": True,
+                    "level_id": orig_w.level_id,
+                    "wall_id": orig_w.id,
+                })
+            else:
+                phi_s = a % TWO_PI
+                phi_e = b % TWO_PI
+                xs = cx + r * math.cos(phi_e if rep_w.arc_extent > 0 else phi_s)
+                ys = cy + r * math.sin(phi_e if rep_w.arc_extent > 0 else phi_s)
+                xe = cx + r * math.cos(phi_s if rep_w.arc_extent > 0 else phi_e)
+                ye = cy + r * math.sin(phi_s if rep_w.arc_extent > 0 else phi_e)
+                extent_deg = math.degrees(seg_angle) if rep_w.arc_extent > 0 else -math.degrees(seg_angle)
+                unique_segments.append({
+                    "x_start": round(xs, 2),
+                    "y_start": round(ys, 2),
+                    "x_end": round(xe, 2),
+                    "y_end": round(ye, 2),
+                    "length_m": round(seg_len / 100.0, 3),
+                    "arc_extent": round(extent_deg, 4),
+                    "is_curved": True,
+                    "level_id": rep_w.level_id,
+                    "wall_id": rep_w.id,
+                })
+
+    return total_length_cm, unique_segments
+
+
 class Level:
     def __init__(self, level_id="level1", name="Ground Floor", elevation_cm=0.0, height_cm=280.0,
                  floor_thickness_cm=12.0, extra_attribs=None, extra_children=None):
@@ -261,7 +399,7 @@ class HomeModel:
         return round(sum(w.length_m for w in self.walls.values()), 2)
 
     def get_noded_wall_segments(self, level_id=None):
-        """Derives the physical noded wall arrangement across all intersecting/overlapping walls (PAC-1 T01-T03).
+        """Derives the physical noded wall arrangement across all intersecting/overlapping walls (PAC-1 T01-T03, T05).
         
         Splits collinear overlapping walls and T/X-junctions into unique non-overlapping physical atoms,
         and includes unique curved wall segments with their analytic arc length and extent.
@@ -275,12 +413,6 @@ class HomeModel:
         target_levels = [level_id] if level_id else [lvl.id for lvl in self.levels]
         if not target_levels:
             target_levels = list(set(w.level_id for w in self.walls.values())) or ["level1"]
-
-        def _canonical_arc_key(w):
-            p1 = (round(w.x_start, 2), round(w.y_start, 2))
-            p2 = (round(w.x_end, 2), round(w.y_end, 2))
-            arc = round(float(w.arc_extent), 2)
-            return min((p1, p2, arc), (p2, p1, -arc))
 
         noded = []
         for lvl in target_levels:
@@ -309,24 +441,9 @@ class HomeModel:
                                 "level_id": lvl,
                             })
             
-            # Include unique curved walls with analytic length
-            seen_arcs = set()
-            for w in lvl_walls:
-                if abs(getattr(w, "arc_extent", 0.0)) >= 1e-4 and w.length > 1e-4:
-                    k = _canonical_arc_key(w)
-                    if k not in seen_arcs:
-                        seen_arcs.add(k)
-                        noded.append({
-                            "x_start": round(w.x_start, 2),
-                            "y_start": round(w.y_start, 2),
-                            "x_end": round(w.x_end, 2),
-                            "y_end": round(w.y_end, 2),
-                            "length_m": round(w.length / 100.0, 3),
-                            "arc_extent": w.arc_extent,
-                            "is_curved": True,
-                            "level_id": lvl,
-                            "wall_id": w.id,
-                        })
+            # Include unique curved walls with analytic circular interval union
+            _, curved_segments = _compute_unique_curved_runs(lvl_walls)
+            noded.extend(curved_segments)
 
         return noded
 
@@ -344,12 +461,6 @@ class HomeModel:
             if not target_levels:
                 target_levels = list(set(w.level_id for w in self.walls.values())) or ["level1"]
 
-            def _canonical_arc_key(w):
-                p1 = (round(w.x_start, 2), round(w.y_start, 2))
-                p2 = (round(w.x_end, 2), round(w.y_end, 2))
-                arc = round(float(w.arc_extent), 2)
-                return min((p1, p2, arc), (p2, p1, -arc))
-            
             total_cm = 0.0
             for lvl in target_levels:
                 lvl_walls = [w for w in self.walls.values() if w.level_id == lvl]
@@ -361,14 +472,9 @@ class HomeModel:
                 if straight_lines:
                     total_cm += unary_union(straight_lines).length
                 
-                # Add exact analytic arc length for unique curved walls
-                seen_arcs = set()
-                for w in lvl_walls:
-                    if abs(getattr(w, "arc_extent", 0.0)) >= 1e-4 and w.length > 1e-4:
-                        k = _canonical_arc_key(w)
-                        if k not in seen_arcs:
-                            seen_arcs.add(k)
-                            total_cm += w.length
+                # Add exact analytic arc length for unique curved walls via interval union
+                curved_cm, _ = _compute_unique_curved_runs(lvl_walls)
+                total_cm += curved_cm
 
             return round(total_cm / 100.0, 2)
         except Exception:
@@ -393,7 +499,26 @@ class HomeModel:
 
         # Preserve snapshot for full atomicity across direct model API calls
         orig_walls = dict(self.walls)
-        orig_openings = dict(self.openings)
+        orig_openings_dict = dict(self.openings)
+        orig_openings_state = {
+            op_id: {
+                "wall_id": op.wall_id,
+                "offset_cm": op.offset_cm,
+                "x_cm": getattr(op, "x_cm", None),
+                "y_cm": getattr(op, "y_cm", None),
+                "angle_deg": getattr(op, "angle_deg", None),
+                "width_cm": op.width_cm,
+                "height_cm": op.height_cm,
+                "opening_type": op.opening_type,
+                "swing": op.swing,
+                "elevation_cm": op.elevation_cm,
+                "depth_cm": op.depth_cm,
+                "level_id": op.level_id,
+                "extra_attribs": dict(op.extra_attribs),
+                "extra_children": list(op.extra_children),
+            }
+            for op_id, op in self.openings.items()
+        }
 
         try:
             total_noded = 0
@@ -438,34 +563,61 @@ class HomeModel:
                     # Check attribute and face intent compatibility across overlapping sources
                     base_w = sources[0]
                     dx1, dy1 = base_w.x_end - base_w.x_start, base_w.y_end - base_w.y_start
+
+                    merged_attribs = dict(base_w.extra_attribs)
+                    merged_children = list(base_w.extra_children)
+
                     for other in sources[1:]:
                         if abs(other.thickness - base_w.thickness) > 1e-3:
                             raise ValueError(f"Conflicting wall thickness on overlapping segment between {base_w.id} ({base_w.thickness}cm) and {other.id} ({other.thickness}cm)")
                         if abs(other.height - base_w.height) > 1e-3:
                             raise ValueError(f"Conflicting wall height on overlapping segment between {base_w.id} ({base_w.height}cm) and {other.id} ({other.height}cm)")
 
-                        # Compare face intent in normalized physical orientation
+                        # Compare and merge face intent in normalized physical orientation
                         dx2, dy2 = other.x_end - other.x_start, other.y_end - other.y_start
                         aligned = (dx1 * dx2 + dy1 * dy2) > 0
                         if aligned:
-                            l1, l2 = base_w.extra_attribs.get('leftSideColor'), other.extra_attribs.get('leftSideColor')
-                            r1, r2 = base_w.extra_attribs.get('rightSideColor'), other.extra_attribs.get('rightSideColor')
+                            other_left = other.extra_attribs.get('leftSideColor')
+                            other_right = other.extra_attribs.get('rightSideColor')
                         else:
-                            l1, l2 = base_w.extra_attribs.get('leftSideColor'), other.extra_attribs.get('rightSideColor')
-                            r1, r2 = base_w.extra_attribs.get('rightSideColor'), other.extra_attribs.get('leftSideColor')
-                        if (l1 and l2 and l1 != l2) or (r1 and r2 and r1 != r2):
+                            other_left = other.extra_attribs.get('rightSideColor')
+                            other_right = other.extra_attribs.get('leftSideColor')
+
+                        curr_left = merged_attribs.get('leftSideColor')
+                        curr_right = merged_attribs.get('rightSideColor')
+
+                        if curr_left and other_left and curr_left != other_left:
                             raise ValueError(f"Conflicting wall face color/material intent on overlapping segment between {base_w.id} and {other.id}")
+                        if curr_right and other_right and curr_right != other_right:
+                            raise ValueError(f"Conflicting wall face color/material intent on overlapping segment between {base_w.id} and {other.id}")
+
+                        if other_left:
+                            merged_attribs['leftSideColor'] = other_left
+                        if other_right:
+                            merged_attribs['rightSideColor'] = other_right
+
+                        # Merge other non-color attributes
+                        for k, v in other.extra_attribs.items():
+                            if k not in ('leftSideColor', 'rightSideColor'):
+                                if k in merged_attribs and merged_attribs[k] != v:
+                                    raise ValueError(f"Conflicting attribute '{k}' on overlapping segment between {base_w.id} and {other.id}")
+                                merged_attribs[k] = v
+
+                        # Merge unique extra children
+                        for child in other.extra_children:
+                            if child not in merged_children:
+                                merged_children.append(child)
 
                     # Orient atom to match base source wall direction
                     atom_dx, atom_dy = p2[0] - p1[0], p2[1] - p1[1]
                     if (atom_dx * dx1 + atom_dy * dy1) < 0:
                         p1, p2 = p2, p1
                     
-                    atom_sources.append((p1, p2, sources))
+                    atom_sources.append((p1, p2, sources, merged_attribs, merged_children))
 
                 # Build wall_id -> list of (atom_idx, s_start, s_end, is_aligned)
                 wall_to_atoms = {w.id: [] for w in lvl_walls}
-                for a_idx, (p1, p2, sources) in enumerate(atom_sources):
+                for a_idx, (p1, p2, sources, merged_attribs, merged_children) in enumerate(atom_sources):
                     for w in sources:
                         dx, dy = w.x_end - w.x_start, w.y_end - w.y_start
                         L = w.chord_length
@@ -500,7 +652,7 @@ class HomeModel:
                 for w in lvl_walls:
                     used_ids.discard(w.id)
 
-                for a_idx, (p1, p2, sources) in enumerate(atom_sources):
+                for a_idx, (p1, p2, sources, merged_attribs, merged_children) in enumerate(atom_sources):
                     if len(sources) == 1 and len(wall_to_atoms[sources[0].id]) == 1:
                         cand_id = sources[0].id
                     elif len(sources) == 1:
@@ -521,14 +673,14 @@ class HomeModel:
                     del self.walls[w.id]
 
                 # Add new noded walls with preserved source attributes and children
-                for a_idx, (p1, p2, sources) in enumerate(atom_sources):
+                for a_idx, (p1, p2, sources, merged_attribs, merged_children) in enumerate(atom_sources):
                     base_w = sources[0]
                     new_id = atom_ids[a_idx]
                     self.add_wall(
                         new_id, round(p1[0], 2), round(p1[1], 2), round(p2[0], 2), round(p2[1], 2),
                         thickness=base_w.thickness, height=base_w.height, level_id=lvl,
-                        extra_attribs=dict(base_w.extra_attribs),
-                        extra_children=list(base_w.extra_children)
+                        extra_attribs=merged_attribs,
+                        extra_children=merged_children
                     )
                     total_noded += 1
 
@@ -554,9 +706,26 @@ class HomeModel:
             return total_noded
 
         except Exception:
-            # Atomic rollback on any failure
+            # Atomic rollback on any failure: restore walls dictionary and restore opening instances in-place
             self.walls = orig_walls
-            self.openings = orig_openings
+            for op_id, state in orig_openings_state.items():
+                if op_id in self.openings:
+                    op = self.openings[op_id]
+                    op.wall_id = state["wall_id"]
+                    op.offset_cm = state["offset_cm"]
+                    op.x_cm = state["x_cm"]
+                    op.y_cm = state["y_cm"]
+                    op.angle_deg = state["angle_deg"]
+                    op.width_cm = state["width_cm"]
+                    op.height_cm = state["height_cm"]
+                    op.opening_type = state["opening_type"]
+                    op.swing = state["swing"]
+                    op.elevation_cm = state["elevation_cm"]
+                    op.depth_cm = state["depth_cm"]
+                    op.level_id = state["level_id"]
+                    op.extra_attribs = dict(state["extra_attribs"])
+                    op.extra_children = list(state["extra_children"])
+            self.openings = orig_openings_dict
             raise
 
     def takeoff(self):

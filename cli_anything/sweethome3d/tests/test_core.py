@@ -2197,6 +2197,91 @@ def test_curved_physical_runs_unique_deduplication():
     assert segments[0]["length_m"] == 4.443
 
 
+def test_multilevel_noding_late_failure_restores_direct_openings_atomically():
+    """PAC-1 T04, T06, R15-P1-01: Late multilevel noding failure restores mutated openings and preserves to_dict equality."""
+    m = HomeModel()
+    m.add_wall('host', 0, 0, 300, 0)
+    m.add_wall('cross', 150, 0, 150, 150)
+    m.add_opening('d', 'Door', wall_id='host', offset_cm=200, width_cm=90)
+    m.add_level('level2', 'Second', elevation_cm=300)
+    m.add_wall('a2', 0, 0, 300, 0, thickness=15, level_id='level2')
+    m.add_wall('b2', 150, 0, 450, 0, thickness=30, level_id='level2')
+    assert m.validate()['valid'] is True
+    before = m.to_dict()
+    with pytest.raises(ValueError, match="Conflicting wall thickness"):
+        m.node_walls()
+    assert m.to_dict() == before
+    d = m.openings['d']
+    assert d.wall_id == 'host'
+    assert d.offset_cm == 200.0
+    assert d.x_cm is None
+    assert d.y_cm is None
+    assert d.angle_deg is None
+    assert m.validate()['valid'] is True
+
+
+def test_coincident_wall_merge_preserves_all_sources_metadata_and_children():
+    """PAC-1 T04, T06, N09, R15-P1-02: Merged coincident walls preserve face metadata and native children across all sources."""
+    m = HomeModel()
+    m.add_wall('a', 0, 0, 300, 0,
+               extra_attribs={'leftSideColor': '00FFFFFF'})
+    m.add_wall('b', 0, 0, 300, 0,
+               extra_attribs={'rightSideColor': '00112233'},
+               extra_children=['<property name="must_survive" value="native"/>'])
+    m.node_walls()
+    assert len(m.walls) == 1
+    w = next(iter(m.walls.values()))
+    assert w.extra_attribs.get('leftSideColor') == '00FFFFFF'
+    assert w.extra_attribs.get('rightSideColor') == '00112233'
+    assert w.extra_children == ['<property name="must_survive" value="native"/>']
+
+
+def test_coincident_wall_merge_antiparallel_normalizes_and_preserves_face_colors():
+    """PAC-1 T04, T06, N09, R15-P1-02: Antiparallel sources correctly normalize side colors to physical world orientation."""
+    m = HomeModel()
+    # Wall a: 0 -> 300 (dx > 0), left side is physically Y < 0
+    m.add_wall('a', 0, 0, 300, 0,
+               extra_attribs={'leftSideColor': '00FFFFFF'})
+    # Wall b: 300 -> 0 (dx < 0), right side is physically Y < 0 (left of wall a)
+    # And b's left side is physically Y > 0 (right of wall a)
+    m.add_wall('b', 300, 0, 0, 0,
+               extra_attribs={'leftSideColor': '00AABBCC'})
+    m.node_walls()
+    assert len(m.walls) == 1
+    w = next(iter(m.walls.values()))
+    assert w.extra_attribs.get('leftSideColor') == '00FFFFFF'
+    assert w.extra_attribs.get('rightSideColor') == '00AABBCC'
+
+
+def test_partial_curved_overlap_interval_union():
+    """PAC-1 T05, T09, E08, R15-P1-03: Partial coincident arcs union analytically; contained 45 deg half reports exact 4.44m."""
+    m = HomeModel()
+    m.add_wall('full', 0, 0, 400, 0, arc_extent=90)
+    full = m.walls['full']
+    midpoint = full.point_at_offset(full.length / 2)
+    m.add_wall('half', 0, 0, *midpoint, arc_extent=45)
+    # The 45° half is wholly contained within the 90° arc; unique physical run is 4.44m (not 6.66m)
+    assert m.total_noded_wall_length_m == 4.44
+    noded_atoms = m.get_noded_wall_segments()
+    curved_atoms = [a for a in noded_atoms if a.get('is_curved')]
+    assert len(curved_atoms) == 1
+    assert curved_atoms[0]['length_m'] == 4.443
+    assert abs(curved_atoms[0]['arc_extent'] - 90.0) < 1e-3
+
+
+def test_curved_wall_different_sweeps_not_collapsed():
+    """PAC-1 T05, T09, E08, R15-P1-03: Large chord walls with 90 deg vs 90.004 deg sweeps midpoints differ by >0.01cm."""
+    m = HomeModel()
+    m.add_wall('w1', 0, 0, 40000, 0, arc_extent=90)
+    m.add_wall('w2', 0, 0, 40000, 0, arc_extent=90.004)
+    # Midpoints differ by ~0.409 cm (> 0.01 cm budget); must not collapse into single curve
+    assert m.total_noded_wall_length_m == 888.58
+    noded_atoms = m.get_noded_wall_segments()
+    curved_atoms = [a for a in noded_atoms if a.get('is_curved')]
+    assert len(curved_atoms) == 2
+
+
+
 
 
 
