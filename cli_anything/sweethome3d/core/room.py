@@ -81,28 +81,35 @@ class Room:
         cy /= (6.0 * signed_area)
         return (round(cx, 2), round(cy, 2))
 
-    def get_clear_core_polygon(self, walls=None):
-        """Derives the clear core polygon bounded by actual incident walls (PAC-1 T07, R10-P1-01, R11-P1-01)."""
+    def get_region_polygon(self):
+        """Constructs and strictly validates the 2D planar polygon region of the room (PAC-1 C01, T07, A07, R20-P1-02)."""
         import math
+        from shapely.geometry import Polygon
+        from shapely.validation import explain_validity
+
+        rings = [self.points, *(self.holes or [])]
+        for index, ring in enumerate(rings):
+            if len(ring) < 3 or len(set(map(tuple, ring))) < 3:
+                raise ValueError(f"Room {self.id} ring {index} requires three distinct vertices")
+            if not all(math.isfinite(x) and math.isfinite(y) for x, y in ring):
+                raise ValueError(f"Room {self.id} ring {index} has nonfinite coordinates")
+        region = Polygon(self.points, self.holes or [])
+        if region.is_empty or not region.is_valid:
+            raise ValueError(f"Invalid room {self.id} polygon: {explain_validity(region)}")
+        return region
+
+    def get_clear_core_polygon(self, walls=None):
+        """Derives the clear core polygon bounded by actual incident walls (PAC-1 T07, R10-P1-01, R11-P1-01, R20-P1-02)."""
         try:
             from shapely.geometry import Polygon, LineString
             from shapely.ops import unary_union
         except ImportError:
             return None
         
-        if len(self.points) < 3:
+        try:
+            poly = self.get_region_polygon()
+        except ValueError:
             return None
-
-        if not all(math.isfinite(p[0]) and math.isfinite(p[1]) for p in self.points):
-            return None
-        if self.holes:
-            for h in self.holes:
-                if not all(math.isfinite(p[0]) and math.isfinite(p[1]) for p in h):
-                    return None
-        
-        poly = Polygon(self.points, holes=self.holes or [])
-        if poly.is_empty or not poly.is_valid:
-            return poly
 
         # Find incident walls on the exact same level
         incident_wall_polys = []

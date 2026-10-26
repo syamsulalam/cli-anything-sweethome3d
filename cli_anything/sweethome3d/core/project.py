@@ -1210,8 +1210,11 @@ class HomeModel:
                     findings.append({"code": "NON_FINITE_COORDINATE", "severity": "error", "entity_ids": [f.id], "message": msg})
 
         for dim in self.dimensions.values():
+            e_start = getattr(dim, "elevation_start_cm", dim.elevation_cm)
+            e_end = getattr(dim, "elevation_end_cm", dim.elevation_cm)
             for val, name in [(dim.x_start, "x_start"), (dim.y_start, "y_start"), (dim.x_end, "x_end"), (dim.y_end, "y_end"),
-                              (dim.offset_cm, "offset_cm"), (dim.elevation_cm, "elevation_cm")]:
+                              (dim.offset_cm, "offset_cm"), (dim.elevation_cm, "elevation_cm"),
+                              (e_start, "elevation_start_cm"), (e_end, "elevation_end_cm")]:
                 if not math.isfinite(val):
                     msg = f"Dimension '{dim.id}' has non-finite coordinate '{name}' ({val})."
                     errors.append(msg)
@@ -1292,36 +1295,55 @@ class HomeModel:
                 msg = f"Room '{r.id}' has fewer than 3 vertices ({len(r.points)})."
                 errors.append(msg)
                 findings.append({"code": "DEGENERATE_ROOM", "severity": "error", "entity_ids": [r.id], "message": msg})
+                if r.area_m2 <= 0.0:
+                    msg2 = f"Room '{r.id}' ({r.name}) has zero or degenerate area ({r.area_m2} m²)."
+                    errors.append(msg2)
+                    findings.append({"code": "ZERO_AREA_ROOM", "severity": "error", "entity_ids": [r.id], "message": msg2})
+                continue
             
             if r.level_id not in level_ids:
                 msg = f"Room '{r.id}' references nonexistent level '{r.level_id}'."
                 errors.append(msg)
                 findings.append({"code": "MISSING_LEVEL_REFERENCE", "severity": "error", "entity_ids": [r.id], "message": msg})
 
-            if len(r.points) >= 3:
-                clear_poly = r.get_clear_core_polygon(self.walls.values())
-                if clear_poly is not None and clear_poly.is_empty:
-                    msg = f"Room '{r.name}' ({r.id}) has an infeasible clear core (incident walls consume entire room area)."
-                    warnings.append(msg)
-                    findings.append({"code": "INFEASIBLE_ROOM_CORE", "severity": "warning", "entity_ids": [r.id], "message": msg})
+            # PAC-1 C01, T07, A07, R20-P1-02: Validate complete room region topology before core geometry
+            try:
+                room_region = r.get_region_polygon()
+            except ValueError as exc:
+                exc_str = str(exc)
+                msg = f"Room '{r.id}' ({r.name}) has invalid geometry: {exc_str}"
+                errors.append(msg)
+                err_code = "ROOM_SELF_INTERSECTION" if "self-intersection" in exc_str.lower() else "INVALID_ROOM_GEOMETRY"
+                findings.append({"code": err_code, "severity": "error", "entity_ids": [r.id], "message": msg})
+                if r.area_m2 <= 0.0:
+                    msg2 = f"Room '{r.id}' ({r.name}) has zero or degenerate area ({r.area_m2} m²)."
+                    errors.append(msg2)
+                    findings.append({"code": "ZERO_AREA_ROOM", "severity": "error", "entity_ids": [r.id], "message": msg2})
+                continue
 
-                n = len(r.points)
-                has_intersection = False
-                for i in range(n):
-                    s1_a, s1_b = r.points[i], r.points[(i + 1) % n]
-                    for j in range(i + 2, n):
-                        if i == 0 and j == n - 1:
-                            continue
-                        s2_a, s2_b = r.points[j], r.points[(j + 1) % n]
-                        if _segments_intersect(s1_a, s1_b, s2_a, s2_b):
-                            has_intersection = True
-                            break
-                    if has_intersection:
+            clear_poly = r.get_clear_core_polygon(self.walls.values())
+            if clear_poly is not None and clear_poly.is_empty:
+                msg = f"Room '{r.name}' ({r.id}) has an infeasible clear core (incident walls consume entire room area)."
+                warnings.append(msg)
+                findings.append({"code": "INFEASIBLE_ROOM_CORE", "severity": "warning", "entity_ids": [r.id], "message": msg})
+
+            n = len(r.points)
+            has_intersection = False
+            for i in range(n):
+                s1_a, s1_b = r.points[i], r.points[(i + 1) % n]
+                for j in range(i + 2, n):
+                    if i == 0 and j == n - 1:
+                        continue
+                    s2_a, s2_b = r.points[j], r.points[(j + 1) % n]
+                    if _segments_intersect(s1_a, s1_b, s2_a, s2_b):
+                        has_intersection = True
                         break
                 if has_intersection:
-                    msg = f"Room '{r.id}' ({r.name}) has a self-intersecting boundary polygon."
-                    errors.append(msg)
-                    findings.append({"code": "ROOM_SELF_INTERSECTION", "severity": "error", "entity_ids": [r.id], "message": msg})
+                    break
+            if has_intersection:
+                msg = f"Room '{r.id}' ({r.name}) has a self-intersecting boundary polygon."
+                errors.append(msg)
+                findings.append({"code": "ROOM_SELF_INTERSECTION", "severity": "error", "entity_ids": [r.id], "message": msg})
 
             if r.area_m2 <= 0.0:
                 msg = f"Room '{r.id}' ({r.name}) has zero or degenerate area ({r.area_m2} m²)."
@@ -1944,6 +1966,9 @@ class HomeModel:
         for dim in self.dimensions.values():
             e_start = getattr(dim, "elevation_start_cm", dim.elevation_cm)
             e_end = getattr(dim, "elevation_end_cm", dim.elevation_cm)
+            # PAC-1 C01, N03, E07, R20-P1-03: Dimension endpoint elevations must be finite before native XML emission
+            if not math.isfinite(e_start) or not math.isfinite(e_end):
+                raise ValueError(f"Dimension '{dim.id}' endpoint elevations must be finite: start={e_start}, end={e_end}")
             d_attrib = {
                 "id": dim.id, "level": dim.level_id,
                 "xStart": str(dim.x_start), "yStart": str(dim.y_start),
@@ -2116,12 +2141,36 @@ class HomeModel:
                 sashes = elem.findall("sash")
                 if sashes:
                     op_type = "door"
-                    first_s = sashes[0]
-                    x_axis = float(first_s.attrib.get("xAxis", "0.0"))
-                    if abs(x_axis - 1.0) < 1e-4:
-                        swing = "left"
+                    if len(sashes) == 1:
+                        first_s = sashes[0]
+                        x_axis = float(first_s.attrib.get("xAxis", "0.0"))
+                        y_axis = float(first_s.attrib.get("yAxis", "0.5"))
+                        width_ratio = float(first_s.attrib.get("width", "1.0"))
+                        start_angle = float(first_s.attrib.get("startAngle", "0.0"))
+                        end_angle = float(first_s.attrib.get("endAngle", "0.0"))
+
+                        is_std_right = (
+                            abs(x_axis - 0.0) < 1e-4 and
+                            abs(y_axis - 0.5) < 1e-4 and
+                            abs(width_ratio - 1.0) < 1e-4 and
+                            abs(start_angle - 0.0) < 1e-4 and
+                            abs(end_angle - (-math.pi / 2)) < 1e-4
+                        )
+                        is_std_left = (
+                            abs(x_axis - 1.0) < 1e-4 and
+                            abs(y_axis - 0.5) < 1e-4 and
+                            abs(width_ratio - 1.0) < 1e-4 and
+                            abs(start_angle - math.pi) < 1e-4 and
+                            abs(end_angle - (3 * math.pi / 2)) < 1e-4
+                        )
+                        if is_std_right:
+                            swing = "right"
+                        elif is_std_left:
+                            swing = "left"
+                        else:
+                            raise ValueError(f"Unsupported native sash operation on door '{op_id}'; import refused")
                     else:
-                        swing = "right"
+                        raise ValueError(f"Unsupported native multileaf sash operation ({len(sashes)} sashes) on door '{op_id}'; import refused")
                 else:
                     elem_name = elem.attrib.get("name")
                     if elem.attrib.get("type") == "window" or (elem_name and "window" in elem_name.lower()):

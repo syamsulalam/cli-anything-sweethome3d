@@ -409,6 +409,14 @@ def export_dxf(model, filepath, level_id=None):
             for p in r.points:
                 dxf.extend(["0", "VERTEX", "8", "ROOMS", "10", f"{p[0]:.2f}", "20", f"{p[1]:.2f}", "30", "0.0"])
             dxf.extend(["0", "SEQEND"])
+            # PAC-1 T07, E03, R20-P1-04: Emit room holes as closed polylines on layer ROOMS
+            if getattr(r, "holes", None):
+                for h in r.holes:
+                    if len(h) >= 3:
+                        dxf.extend(["0", "POLYLINE", "8", "ROOMS", "66", "1", "70", "1"])
+                        for p in h:
+                            dxf.extend(["0", "VERTEX", "8", "ROOMS", "10", f"{p[0]:.2f}", "20", f"{p[1]:.2f}", "30", "0.0"])
+                        dxf.extend(["0", "SEQEND"])
             cx, cy = r.centroid
             dxf.extend([
                 "0", "TEXT", "8", "ROOMS",

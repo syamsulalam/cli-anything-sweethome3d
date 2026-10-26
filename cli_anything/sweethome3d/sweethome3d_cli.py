@@ -1016,6 +1016,87 @@ def gui_cmd(ctx, project_file):
     except RuntimeError as e:
         output_error(ctx, str(e))
 
+@cli.command(name="capability")
+@click.pass_context
+def capability_cmd(ctx):
+    """Outputs agent-native capability manifest and supported CAD features (Gate A01, A04, A07)."""
+    manifest = {
+        "harness": "cli-anything-sweethome3d",
+        "version": "2.12.0",
+        "spec_version": "PAC-1",
+        "geometry_engine": {
+            "name": "shapely",
+            "available": True,
+        },
+        "supported_entities": [
+            "wall", "room", "opening", "furniture", "dimension", "level"
+        ],
+        "supported_exports": [
+            "json", "svg", "dxf", "html", "sh3d"
+        ],
+        "capabilities": {
+            "noded_walls": True,
+            "clear_core": True,
+            "vertical_slabs": True,
+            "scale_bounded_curves": True,
+            "room_holes": True,
+            "door_sweep_collision": True,
+            "atomic_transactions": True,
+            "headless_roundtrip": True
+        }
+    }
+    output_result(ctx, manifest)
+
+@cli.command(name="doctor")
+@click.pass_context
+def doctor_cmd(ctx):
+    """Runs comprehensive environment, session journal, and geometry diagnostics (Gate A08)."""
+    shapely_ok = False
+    try:
+        import shapely
+        shapely_ok = True
+    except ImportError:
+        pass
+
+    session_path = session_mgr.active_file or session_mgr.session_path
+    journal_path = (session_path + ".pending") if session_path else None
+    session_exists = os.path.exists(session_path) if session_path else False
+    has_pending_journal = os.path.exists(journal_path) if journal_path else False
+
+    model_valid = True
+    model_findings = []
+    if session_mgr.model:
+        try:
+            val = session_mgr.model.validate()
+            model_valid = val.get("valid", True)
+            model_findings = val.get("findings", [])
+        except Exception as e:
+            model_valid = False
+            model_findings.append({"code": "MODEL_VALIDATE_ERROR", "severity": "error", "message": str(e)})
+    elif session_exists:
+        try:
+            session_mgr.load_session()
+            if session_mgr.model:
+                val = session_mgr.model.validate()
+                model_valid = val.get("valid", True)
+                model_findings = val.get("findings", [])
+        except Exception as e:
+            model_valid = False
+            model_findings.append({"code": "SESSION_LOAD_ERROR", "severity": "error", "message": str(e)})
+
+    health_data = {
+        "healthy": shapely_ok and not has_pending_journal and model_valid,
+        "checks": {
+            "geometry_engine_available": shapely_ok,
+            "active_session_exists": session_exists,
+            "pending_journal": has_pending_journal,
+            "model_valid": model_valid,
+        },
+        "active_session": session_path,
+        "findings": model_findings
+    }
+    output_result(ctx, health_data)
+
 # ==============================================================================
 # 11. Interactive REPL Mode
 # ==============================================================================

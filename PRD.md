@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.11.0 (PAC-1 Contract Iteration 20)  
+**Document Version:** 2.12.0 (PAC-1 Contract Iteration 21)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -212,6 +212,23 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
   - In `_make_door_sector_poly()`, derive steps from physical error budget $e \le 0.008$ cm: $d\theta = 4 \arcsin(\sqrt{\min(1, e / (2R))})$, $n = \max(32, \lceil|\theta| / d\theta\rceil)$, strictly bounding chord error to $\le 0.008\text{ cm} \le 0.01\text{ cm}$. (`✅ Completed`)
 - [x] **Reconciled Test Suite**:
   - **159 total tests passing in 5.92s** (155 core + 4 E2E; all 12 Round 19 oracles green). (`✅ Completed`)
+
+### Phase 16: Sol Round 20 Prescriptions & Pushing All Vectors Past 9.0 (PAC-1 Iteration 21)
+- [x] **R20-P1-01: Native Sash Recognition, Refusal & Preservation Policy (Gates N07, N09, C06, C07, E02, E07)**:
+  - Recognize canonical single-leaf presets (right / left); explicitly refuse unsupported nonstandard native sash operations (`ValueError`) upon import/export rather than silently replacing them with arbitrary presets. (`✅ Completed`)
+- [x] **R20-P1-02: Shared Region Polygon Validator Ahead of All Room Consumers (Gates C01, C05, T07, A07)**:
+  - Implement `Room.get_region_polygon()` validating 3 distinct vertices per ring, finite coordinates, and overall polygon validity (`region.is_valid`) without silent `buffer(0)` repairs.
+  - Call `get_region_polygon()` in `validate()` and in `get_clear_core_polygon()`, catching topology errors and emitting structured findings (`INVALID_ROOM_GEOMETRY`, `ROOM_SELF_INTERSECTION`). (`✅ Completed`)
+- [x] **R20-P1-03: Dimension Endpoint Elevation Finite Domain Enforcement (Gates C01, N03, E07, A07)**:
+  - Validate finite values for `elevation_start_cm` and `elevation_end_cm` in `DimensionLine.__init__`, `from_dict`, `validate()`, and `to_xml()`. (`✅ Completed`)
+- [x] **R20-P1-04: DXF Room Hole Contour Preservation (Gates E03, E08, T07)**:
+  - In `core/export.py::export_dxf()`, export room hole inner boundaries as closed polylines on layer `ROOMS`, preserving even-odd region parity. (`✅ Completed`)
+- [x] **R20-P1-05: Agent-Native Capability Manifest & Doctor Diagnostics (Gates A01, A04, A07, A08)**:
+  - Add `cli capability` command emitting versioned capability manifest.
+  - Add `cli doctor` command emitting structured environment and session diagnostics. (`✅ Completed`)
+- [x] **Reconciled Test Suite**:
+  - Pass all 8 Round 20 acceptance oracles and integrate into main test suite: **169 total tests passing in 5.70s** (165 core + 4 E2E; 100% green). (`✅ Completed`)
+
 
 
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
-from shapely.geometry import Polygon, Point
+from shapely.geometry import Polygon, Point, GeometryCollection
 from shapely.ops import unary_union
 from cli_anything.sweethome3d import sweethome3d_cli as cli_module
 
@@ -21,7 +21,7 @@ from cli_anything.sweethome3d.core.furniture import Furniture, FURNITURE_CATALOG
 from cli_anything.sweethome3d.core.dimension import DimensionLine
 from cli_anything.sweethome3d.core.project import HomeModel, _make_door_sector_poly
 from cli_anything.sweethome3d.core.session import SessionManager, _locked_save_json, _calc_sha256, ConcurrencyConflictError, RecoveryRequiredError
-from cli_anything.sweethome3d.core.export import export_html, export_svg, calculate_bounds
+from cli_anything.sweethome3d.core.export import export_html, export_svg, export_dxf, calculate_bounds
 
 def test_wall_properties():
     # 6m wall horizontal
@@ -2869,6 +2869,141 @@ def test_true_sweep_wall_penetration_is_not_lost_between_chords():
     assert any(f['code'] == 'DOOR_WALL_COLLISION'
                and set(f['entity_ids']) == {'door', 'blocker'}
                for f in m.validate()['findings'])
+
+
+# ==============================================================================
+# Round 20 Acceptance Oracles & Discovery Tests
+# ==============================================================================
+
+@pytest.mark.parametrize('sashes', [
+    [(0, .5, .5, 0, -math.pi / 2),
+     (1, .5, .5, math.pi, 3 * math.pi / 2)],
+    [(.2, .4, .7, 0, -1.0)],
+], ids=['two_leaf', 'nonstandard_single_leaf'])
+def test_native_sash_list_survives_noop_or_explicitly_refuses(sashes):
+    root = ET.Element('home', version='7400')
+    ET.SubElement(root, 'level', id='level1', name='Ground', elevation='0',
+                  floorThickness='12', height='280')
+    door = ET.SubElement(root, 'doorOrWindow', id='door', name='Native door',
+                         level='level1', x='100', y='0', angle='0',
+                         width='180', depth='20', height='210')
+    keys = ('xAxis', 'yAxis', 'width', 'startAngle', 'endAngle')
+    for sash in sashes:
+        ET.SubElement(door, 'sash', **dict(zip(keys, map(str, sash))))
+    try:
+        m = HomeModel.from_xml(ET.tostring(root, encoding='unicode'))
+        m = HomeModel.from_dict(json.loads(json.dumps(m.to_dict())))
+        output = ET.fromstring(m.to_xml())
+    except ValueError as exc:
+        assert any(w in str(exc).lower() for w in ('sash', 'operation', 'unsupported'))
+        return
+    emitted = output.findall('doorOrWindow/sash')
+    assert len(emitted) == len(sashes), 'Native leaves were silently discarded'
+    for actual, expected in zip(emitted, sashes):
+        assert tuple(float(actual.get(k)) for k in keys) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize('hole', [
+    [(50, 50), (200, 200), (50, 200), (200, 50)],
+    [(0, 100), (100, 100), (100, 200), (0, 200)],
+    [(50, 50), (100, 50)],
+], ids=['self_crossing', 'shared_shell_edge', 'two_vertices'])
+def test_invalid_room_region_is_rejected_before_core_geometry(hole):
+    try:
+        m = HomeModel.from_dict({'rooms': [{
+            'id': 'room', 'name': 'Room', 'level_id': 'level1',
+            'points': [(0, 0), (400, 0), (400, 400), (0, 400)],
+            'holes': [hole],
+        }]})
+    except ValueError as exc:
+        assert any(w in str(exc).lower() for w in ('room', 'hole', 'polygon', 'ring'))
+        return
+    val = m.validate()
+    assert val['valid'] is False
+    assert any(f.get('severity') == 'error' and 'room' in f.get('entity_ids', [])
+               for f in val['findings'])
+
+
+@pytest.mark.parametrize('value', [float('inf'), float('nan')], ids=['inf', 'nan'])
+def test_dimension_endpoint_domain_is_validated_before_native_output(value):
+    m = HomeModel()
+    try:
+        m.add_dimension('dim', 0, 0, 100, 0,
+                        elevation_start_cm=0, elevation_end_cm=value)
+    except ValueError as exc:
+        assert any(w in str(exc).lower() for w in ('finite', 'elevation', 'dimension'))
+        return
+    val = m.validate()
+    assert val['valid'] is False
+    assert any(f.get('code') == 'NON_FINITE_COORDINATE'
+               and 'dim' in f.get('entity_ids', []) for f in val['findings'])
+    with pytest.raises(ValueError, match=r'(?i)finite|elevation|dimension'):
+        m.to_xml()
+
+
+def test_dxf_room_hole_boundary_is_preserved_or_explicitly_refused(tmp_path):
+    shell = [(0, 0), (400, 0), (400, 400), (0, 400)]
+    hole = [(100, 100), (200, 100), (200, 200), (100, 200)]
+    m = HomeModel.from_dict({'rooms': [{
+        'id': 'room', 'name': 'Room', 'points': shell, 'holes': [hole],
+    }]})
+    out = tmp_path / 'room.dxf'
+    try:
+        export_dxf(m, str(out))
+    except ValueError as exc:
+        assert 'hole' in str(exc).lower()
+        return
+    raw = out.read_text(encoding='utf-8').splitlines()
+    pairs = [(raw[i].strip(), raw[i + 1].strip()) for i in range(0, len(raw), 2)]
+    entities = []
+    for code, value in pairs:
+        if code == '0':
+            entities.append([value, []])
+        elif entities:
+            entities[-1][1].append((code, value))
+    region = GeometryCollection()
+    points = None
+    for kind, attrs in entities:
+        attrs = dict(attrs)
+        if kind == 'POLYLINE':
+            points = [] if attrs.get('8') == 'ROOMS' else None
+        elif kind == 'VERTEX' and points is not None:
+            points.append((float(attrs['10']), float(attrs['20'])))
+        elif kind == 'SEQEND' and points is not None:
+            region = region.symmetric_difference(Polygon(points))
+            points = None
+    expected = Polygon(shell, [hole])
+    assert region.symmetric_difference(expected).area <= 0.01
+
+
+def test_cli_capability_discovery():
+    runner = CliRunner()
+    res = runner.invoke(cli_module.cli, ["capability"])
+    assert res.exit_code == 0
+    assert "cli-anything-sweethome3d" in res.output
+
+    res_json = runner.invoke(cli_module.cli, ["--json", "capability"])
+    assert res_json.exit_code == 0
+    data = json.loads(res_json.output)
+    assert data["status"] == "success"
+    assert data["data"]["harness"] == "cli-anything-sweethome3d"
+    assert data["data"]["capabilities"]["noded_walls"] is True
+    assert data["data"]["capabilities"]["door_sweep_collision"] is True
+
+
+def test_cli_doctor_diagnostics():
+    runner = CliRunner()
+    res = runner.invoke(cli_module.cli, ["doctor"])
+    assert res.exit_code == 0
+    assert "healthy" in res.output
+
+    res_json = runner.invoke(cli_module.cli, ["--json", "doctor"])
+    assert res_json.exit_code == 0
+    data = json.loads(res_json.output)
+    assert data["status"] == "success"
+    assert "healthy" in data["data"]
+    assert data["data"]["checks"]["geometry_engine_available"] is True
+
 
 
 
