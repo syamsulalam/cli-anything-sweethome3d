@@ -4,12 +4,13 @@ import tempfile
 import zipfile
 import json
 import shutil
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, Point
 from shapely.ops import unary_union
 from cli_anything.sweethome3d import sweethome3d_cli as cli_module
 
@@ -18,7 +19,7 @@ from cli_anything.sweethome3d.core.room import Room
 from cli_anything.sweethome3d.core.opening import Opening
 from cli_anything.sweethome3d.core.furniture import Furniture, FURNITURE_CATALOG
 from cli_anything.sweethome3d.core.dimension import DimensionLine
-from cli_anything.sweethome3d.core.project import HomeModel
+from cli_anything.sweethome3d.core.project import HomeModel, _make_door_sector_poly
 from cli_anything.sweethome3d.core.session import SessionManager, _locked_save_json, _calc_sha256, ConcurrencyConflictError, RecoveryRequiredError
 from cli_anything.sweethome3d.core.export import export_html, export_svg, calculate_bounds
 
@@ -2721,6 +2722,154 @@ def test_door_wall_collision_subtracts_active_cutout_void():
                   width_cm=100,height_cm=210,depth_cm=10,swing='none')
     assert not any(f['code']=='DOOR_WALL_COLLISION' and set(f['entity_ids'])=={'d','partition'}
                    for f in m.validate()['findings'])
+
+
+# PAC-1 Round 19 Acceptance Oracles (Iteration 20)
+
+def hosted_door():
+    m = HomeModel()
+    m.add_wall('host', 0, 0, 400, 0)
+    m.add_opening('door', 'Door', wall_id='host', offset_cm=100,
+                  width_cm=90, swing='right')
+    return m
+
+
+def test_opening_metadata_station_survives_native_roundtrip():
+    m = hosted_door()
+    restored = HomeModel.from_xml(m.to_xml())
+    assert restored.openings['door'].wall_id == 'host'
+    assert restored.openings['door'].offset_cm == pytest.approx(100)
+
+
+def test_dimension_endpoint_elevations_survive_session_codec():
+    m = HomeModel()
+    m.add_dimension('dim', 0, 0, 100, 0,
+                    elevation_start_cm=0, elevation_end_cm=100)
+    imported = HomeModel.from_xml(m.to_xml())
+    assert imported.dimensions['dim'].elevation_end_cm == 100
+    persisted = HomeModel.from_dict(json.loads(json.dumps(imported.to_dict())))
+    assert persisted.dimensions['dim'].elevation_end_cm == 100
+    elem = ET.fromstring(persisted.to_xml()).find('dimensionLine')
+    assert float(elem.get('elevationEnd')) == 100
+
+
+def test_owned_opening_metadata_is_unique_after_roundtrip():
+    restored = HomeModel.from_xml(hosted_door().to_xml())
+    root = ET.fromstring(restored.to_xml())
+    props = root.findall("doorOrWindow/property[@name='cli-anything.opening.v1']")
+    assert len(props) == 1
+
+
+def test_editing_known_operation_updates_native_sash_or_refuses():
+    restored = HomeModel.from_xml(hosted_door().to_xml())
+    restored.openings['door'].swing = 'left'
+    try:
+        xml = restored.to_xml()
+    except ValueError as exc:
+        assert any(w in str(exc).lower() for w in ('sash', 'operation', 'unsupported'))
+        return
+    elem = ET.fromstring(xml).find('doorOrWindow')
+    sashes = elem.findall('sash')
+    assert len(sashes) == 1
+    assert float(sashes[0].get('xAxis')) == 1.0
+    assert float(sashes[0].get('startAngle')) == pytest.approx(math.pi)
+    assert float(sashes[0].get('endAngle')) == pytest.approx(3 * math.pi / 2)
+
+
+def test_native_door_child_order_sashes_before_properties():
+    tags = [c.tag for c in ET.fromstring(hosted_door().to_xml()).find('doorOrWindow')]
+    rank = {'sash': 0, 'property': 1, 'textStyle': 2,
+            'texture': 3, 'material': 4, 'transformation': 5}
+    assert [rank[t] for t in tags] == sorted(rank[t] for t in tags)
+
+
+def test_preserved_polyline_precedes_generated_dimension():
+    m = HomeModel()
+    m.extra_elements = ['<polyline><point x="0" y="0"/><point x="10" y="0"/></polyline>']
+    m.add_dimension('dim', 0, 0, 100, 0)
+    tags = [e.tag for e in ET.fromstring(m.to_xml())]
+    assert tags.index('polyline') < tags.index('dimensionLine')
+
+
+@pytest.mark.parametrize('holes', [
+    [[(500, 500), (600, 500), (600, 600), (500, 600)]],
+    [[(50, 50), (200, 50), (200, 200), (50, 200)],
+     [(100, 100), (250, 100), (250, 250), (100, 250)]],
+    [[(50, 50), (float('nan'), 50), (200, 200), (50, 200)]],
+], ids=['outside', 'overlapping', 'nonfinite'])
+def test_invalid_hole_region_is_rejected(holes):
+    m = HomeModel()
+    r = m.add_room('room', 'Room', [(0, 0), (400, 0), (400, 400), (0, 400)])
+    try:
+        r.holes = holes
+        result = m.validate()
+    except ValueError as exc:
+        assert any(w in str(exc).lower() for w in ('hole', 'room', 'finite', 'polygon'))
+        return
+    assert result['valid'] is False
+    assert any(f.get('severity') == 'error' and 'room' in f.get('entity_ids', [])
+               for f in result['findings'])
+
+
+def test_svg_room_region_preserves_hole_or_explicitly_refuses(tmp_path):
+    m = HomeModel()
+    r = m.add_room('room', 'Room', [(0, 0), (400, 0), (400, 400), (0, 400)])
+    r.holes = [[(100, 100), (200, 100), (200, 200), (100, 200)]]
+    out = tmp_path / 'room.svg'
+    try:
+        export_svg(m, str(out))
+    except ValueError as exc:
+        assert 'hole' in str(exc).lower()
+        return
+    regions = []
+    for e in ET.parse(out).iter():
+        if 'room' not in e.get('class', '').split():
+            continue
+        tag = e.tag.split('}')[-1]
+        if tag == 'polygon':
+            coords = [tuple(map(float, s.split(','))) for s in e.get('points').split()]
+            regions.append(Polygon(coords))
+        elif tag == 'path':
+            assert e.get('fill-rule') == 'evenodd'
+            rings = []
+            for sub in re.findall(r'M([^Zz]+)[Zz]', e.get('d', '')):
+                nums = list(map(float, re.findall(r'[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?', sub)))
+                rings.append(list(zip(nums[::2], nums[1::2])))
+            assert rings
+            regions.append(Polygon(rings[0], rings[1:]))
+    assert regions, 'Room geometry must be present or export explicitly refused'
+    expected = Polygon(r.points, r.holes)
+    assert unary_union(regions).symmetric_difference(expected).area <= 0.01
+
+
+def test_door_sector_has_physical_0_01_cm_representation_budget():
+    radius = 200.0
+    sector = _make_door_sector_poly((0, 0), (radius, 0), (0, radius))
+    theta = math.pi / 128
+    true_arc_point = Point(radius * math.cos(theta), radius * math.sin(theta))
+    assert sector.distance(true_arc_point) <= 0.01
+
+
+def test_true_sweep_wall_penetration_is_not_lost_between_chords():
+    m = HomeModel()
+    m.add_wall('host', 0, 0, 400, 0)
+    m.add_opening('door', 'Door', wall_id='host', offset_cm=100,
+                  width_cm=200, swing='right')
+    theta = math.pi / 128
+    ux, uy = math.cos(theta), math.sin(theta)
+    vx, vy = -uy, ux
+    cx, cy = 100 + 199.96 * ux, 199.96 * uy
+    m.add_wall('blocker', cx - 2.5 * vx, cy - 2.5 * vy,
+               cx + 2.5 * vx, cy + 2.5 * vy, thickness=0.02)
+    for along in (-2.5, 2.5):
+        for radial in (-0.01, 0.01):
+            x = (199.96 + radial) * ux + along * vx
+            y = (199.96 + radial) * uy + along * vy
+            assert x > 0 and y > 0 and math.hypot(x, y) < 200
+    assert any(f['code'] == 'DOOR_WALL_COLLISION'
+               and set(f['entity_ids']) == {'door', 'blocker'}
+               for f in m.validate()['findings'])
+
 
 
 

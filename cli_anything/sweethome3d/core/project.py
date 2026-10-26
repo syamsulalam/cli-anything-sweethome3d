@@ -148,8 +148,8 @@ def resolve_wall_material(model, wall, *, z0_cm: float, z1_cm: float, error_cm: 
     return slices
 
 
-def _make_door_sector_poly(hinge, p_latch, p_open, n_steps=32):
-    """Constructs a 2D polygonal approximation of a circular door swing sector (PAC-1 C08, R18-P1-03)."""
+def _make_door_sector_poly(hinge, p_latch, p_open, n_steps=None):
+    """Constructs a 2D polygonal approximation of a circular door swing sector (PAC-1 C08, R18-P1-03, R19-P1-05)."""
     try:
         from shapely.geometry import Polygon
     except ImportError:
@@ -164,6 +164,16 @@ def _make_door_sector_poly(hinge, p_latch, p_open, n_steps=32):
     diff = (a_open - a_closed) % (2.0 * math.pi)
     if diff > math.pi:
         diff -= 2.0 * math.pi
+    if n_steps is None:
+        # PAC-1 C08, R19-P1-05: Physical error budget e <= 0.008 cm <= 0.01 cm
+        # Chord sagitta: e = 2 * R * sin^2(d_theta / 4) -> d_theta = 4 * asin(sqrt(min(1.0, e / (2 * R))))
+        e_budget = 0.008
+        if r_swing > e_budget / 2.0:
+            d_theta = 4.0 * math.asin(math.sqrt(min(1.0, e_budget / (2.0 * r_swing))))
+            steps = int(math.ceil(abs(diff) / d_theta))
+            n_steps = max(32, steps)
+        else:
+            n_steps = 32
     pts = [hinge]
     for i in range(n_steps + 1):
         ang = a_closed + (diff * i / n_steps)
@@ -1166,6 +1176,14 @@ class HomeModel:
                         msg = f"Room '{r.id}' vertex {idx} has non-finite coordinate '{name}' ({val})."
                         errors.append(msg)
                         findings.append({"code": "NON_FINITE_COORDINATE", "severity": "error", "entity_ids": [r.id], "message": msg})
+            if getattr(r, "holes", None):
+                for h_idx, hole in enumerate(r.holes):
+                    for idx, pt in enumerate(hole):
+                        for val, name in [(pt[0], "x"), (pt[1], "y")]:
+                            if not math.isfinite(val):
+                                msg = f"Room '{r.id}' hole {h_idx} vertex {idx} has non-finite coordinate '{name}' ({val})."
+                                errors.append(msg)
+                                findings.append({"code": "NON_FINITE_COORDINATE", "severity": "error", "entity_ids": [r.id], "message": msg})
 
         for op in self.openings.values():
             check_vals = [(op.offset_cm, "offset_cm"), (op.width_cm, "width_cm"), (op.height_cm, "height_cm"), (op.elevation_cm, "elevation_cm")]
@@ -1310,6 +1328,48 @@ class HomeModel:
                 errors.append(msg)
                 findings.append({"code": "ZERO_AREA_ROOM", "severity": "error", "entity_ids": [r.id], "message": msg})
 
+            if len(r.points) >= 3 and getattr(r, "holes", None):
+                holes_finite = True
+                for h in r.holes:
+                    if not all(math.isfinite(p[0]) and math.isfinite(p[1]) for p in h):
+                        holes_finite = False
+                        break
+                if holes_finite and all(math.isfinite(p[0]) and math.isfinite(p[1]) for p in r.points):
+                    try:
+                        from shapely.geometry import Polygon
+                        shell_poly = Polygon(r.points)
+                        hole_polys = []
+                        for h_idx, hole in enumerate(r.holes):
+                            if len(hole) < 3:
+                                msg = f"Room '{r.id}' hole {h_idx} has fewer than 3 vertices ({len(hole)})."
+                                errors.append(msg)
+                                findings.append({"code": "DEGENERATE_ROOM_HOLE", "severity": "error", "entity_ids": [r.id], "message": msg})
+                                continue
+                            h_poly = Polygon(hole)
+                            if not h_poly.is_valid:
+                                h_poly = h_poly.buffer(0)
+                            hole_polys.append((h_idx, h_poly))
+
+                            # PAC-1 T07, R19-P1-04: Hole must be strictly inside room shell
+                            if not shell_poly.contains(h_poly):
+                                msg = f"Room '{r.id}' hole {h_idx} is not strictly contained within room shell boundary."
+                                errors.append(msg)
+                                findings.append({"code": "ROOM_HOLE_OUTSIDE_SHELL", "severity": "error", "entity_ids": [r.id], "message": msg})
+
+                        # PAC-1 T07, R19-P1-04: Check for overlapping holes
+                        for i in range(len(hole_polys)):
+                            for j in range(i + 1, len(hole_polys)):
+                                idx_i, poly_i = hole_polys[i]
+                                idx_j, poly_j = hole_polys[j]
+                                if poly_i.intersects(poly_j):
+                                    inter = poly_i.intersection(poly_j)
+                                    if inter.area > 1e-4:
+                                        msg = f"Room '{r.id}' has overlapping holes ({idx_i} and {idx_j})."
+                                        errors.append(msg)
+                                        findings.append({"code": "ROOM_HOLES_OVERLAP", "severity": "error", "entity_ids": [r.id], "message": msg})
+                    except Exception:
+                        pass
+
         # 4. Check furniture invariants and spatial collisions (Oriented Bounding Box SAT)
         def _get_furn_corners(f):
             rad = math.radians(f.angle_deg)
@@ -1345,7 +1405,13 @@ class HomeModel:
             return all(math.isfinite(v) for v in (w.x_start, w.y_start, w.x_end, w.y_end, w.height, w.thickness, w.arc_extent))
 
         def _is_finite_room(r):
-            return len(r.points) >= 3 and all(math.isfinite(p[0]) and math.isfinite(p[1]) for p in r.points)
+            if len(r.points) < 3 or not all(math.isfinite(p[0]) and math.isfinite(p[1]) for p in r.points):
+                return False
+            if getattr(r, "holes", None):
+                for h in r.holes:
+                    if len(h) < 3 or not all(math.isfinite(p[0]) and math.isfinite(p[1]) for p in h):
+                        return False
+            return True
 
         def _is_finite_opening(op):
             vals = [op.offset_cm, op.width_cm, op.height_cm, op.elevation_cm]
@@ -1787,7 +1853,15 @@ class HomeModel:
                     op_attrib[k] = v
             op_elem = ET.SubElement(root, "doorOrWindow", **op_attrib)
 
-            # PAC-1 N02, R18-P1-02: Write reversible opening metadata
+            # PAC-1 N02, N09, R19-P1-02, R19-P1-03: Order door child elements according to Sweet Home 3D DTD
+            # Native sash child for door swing only if opening_type == 'door' and swing in ('left', 'right')
+            if op.opening_type == "door" and op.swing in ("left", "right"):
+                if op.swing == "right":
+                    ET.SubElement(op_elem, "sash", xAxis="0.0", yAxis="0.5", width="1.0", startAngle="0.0", endAngle=str(-math.pi / 2))
+                elif op.swing == "left":
+                    ET.SubElement(op_elem, "sash", xAxis="1.0", yAxis="0.5", width="1.0", startAngle=str(math.pi), endAngle=str(3 * math.pi / 2))
+
+            # PAC-1 N02, R18-P1-02, R19-P1-02: Write reversible opening metadata
             OPENING_META = "cli-anything.opening.v1"
             meta_dict = {
                 "version": 1,
@@ -1799,19 +1873,20 @@ class HomeModel:
             ET.SubElement(op_elem, "property", name=OPENING_META,
                           value=json.dumps(meta_dict, separators=(',', ':'), allow_nan=False))
 
-            # Native sash child for door swing only if opening_type == 'door' and swing in ('left', 'right')
-            has_sash = any("<sash" in c for c in op.extra_children)
-            if not has_sash and op.opening_type == "door" and op.swing in ("left", "right"):
-                if op.swing == "right":
-                    ET.SubElement(op_elem, "sash", xAxis="0.0", yAxis="0.5", width="1.0", startAngle="0.0", endAngle=str(-math.pi / 2))
-                elif op.swing == "left":
-                    ET.SubElement(op_elem, "sash", xAxis="1.0", yAxis="0.5", width="1.0", startAngle=str(math.pi), endAngle=str(3 * math.pi / 2))
-
             for raw_child in op.extra_children:
                 try:
-                    op_elem.append(ET.fromstring(raw_child))
+                    child_el = ET.fromstring(raw_child)
+                    if child_el.tag == "property" and child_el.attrib.get("name") == OPENING_META:
+                        continue
+                    if child_el.tag == "sash":
+                        continue
+                    op_elem.append(child_el)
                 except Exception:
                     pass
+
+            # Stable sort children of doorOrWindow by DTD rank
+            DOOR_RANK = {'sash': 0, 'property': 1, 'textStyle': 2, 'texture': 3, 'material': 4, 'transformation': 5}
+            op_elem[:] = sorted(list(op_elem), key=lambda e: DOOR_RANK.get(e.tag, 999))
 
         # Furniture (angle in radians per native Sweet Home 3D API)
         for f in self.furniture.values():
@@ -1894,6 +1969,9 @@ class HomeModel:
                     root.append(el)
             except Exception:
                 pass
+
+        # PAC-1 N03, N09, R19-P1-03: Stable sort all root child elements according to DTD sequence
+        root[:] = sorted(list(root), key=lambda e: ROOT_RANK.get(e.tag, 999))
 
         rough_string = ET.tostring(root, "utf-8")
         reparsed = minidom.parseString(rough_string)
@@ -2003,7 +2081,12 @@ class HomeModel:
         for elem in root.findall("doorOrWindow"):
             known_op_keys = {"id", "name", "wall", "offset", "width", "height", "type", "swing", "x", "y", "depth", "angle", "level", "elevation"}
             extra_attribs = {k: v for k, v in elem.attrib.items() if k not in known_op_keys}
-            extra_children = [ET.tostring(c, encoding="unicode") for c in elem]
+            # PAC-1 N02, N09, R19-P1-02: Filter out opening metadata property and native sashes from extra_children
+            extra_children = [
+                ET.tostring(c, encoding="unicode") for c in elem
+                if not (c.tag == "property" and c.attrib.get("name") == "cli-anything.opening.v1")
+                and c.tag != "sash"
+            ]
 
             op_id = elem.attrib.get("id")
             name = elem.attrib.get("name", "Door/Window")
@@ -2013,7 +2096,9 @@ class HomeModel:
             op_type = elem.attrib.get("type", "door")
             swing = elem.attrib.get("swing", "right")
 
-            # PAC-1 N02, R18-P1-02: Check for cli-anything.opening.v1 metadata property
+            offset_cm = float(elem.attrib["offset"]) if "offset" in elem.attrib else None
+
+            # PAC-1 N02, R18-P1-02, R19-P1-02: Check for cli-anything.opening.v1 metadata property
             meta_prop = elem.find("property[@name='cli-anything.opening.v1']")
             if meta_prop is not None and meta_prop.attrib.get("value"):
                 try:
@@ -2059,10 +2144,6 @@ class HomeModel:
                 else:
                     angle_deg = round(math.degrees(angle_raw) % 360.0, 6)
             level_id = elem.attrib.get("level", "level1")
-
-            offset_cm = None
-            if "offset" in elem.attrib:
-                offset_cm = float(elem.attrib["offset"])
 
             # Native opening handling without 'wall' or with spatial coordinates
             if wall_id is None or wall_id not in model.walls:

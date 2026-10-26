@@ -78,6 +78,8 @@ class DimensionLine:
             "offset_cm": self.offset_cm,
             "level_id": self.level_id,
             "elevation_cm": self.elevation_cm,
+            "elevation_start_cm": self.elevation_start_cm,
+            "elevation_end_cm": self.elevation_end_cm,
             "distance_m": self.distance_m,
             "length_m": self.distance_m,
             "length_cm": self.distance_cm,
@@ -87,6 +89,8 @@ class DimensionLine:
 
     @classmethod
     def from_dict(cls, d):
+        start = float(d.get("elevation_start_cm", d.get("elevation_cm", 0.0)))
+        end = float(d.get("elevation_end_cm", start))
         return cls(
             dimension_id=d.get("id"),
             x_start=d.get("x_start", 0.0),
@@ -95,7 +99,8 @@ class DimensionLine:
             y_end=d.get("y_end", 0.0),
             offset_cm=d.get("offset_cm", 30.0),
             level_id=d.get("level_id", "level1"),
-            elevation_cm=d.get("elevation_cm", 0.0),
+            elevation_start_cm=start,
+            elevation_end_cm=end,
             extra_attribs=d.get("extra_attribs"),
             extra_children=d.get("extra_children"),
         )

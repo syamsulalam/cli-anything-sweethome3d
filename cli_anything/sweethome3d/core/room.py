@@ -83,6 +83,7 @@ class Room:
 
     def get_clear_core_polygon(self, walls=None):
         """Derives the clear core polygon bounded by actual incident walls (PAC-1 T07, R10-P1-01, R11-P1-01)."""
+        import math
         try:
             from shapely.geometry import Polygon, LineString
             from shapely.ops import unary_union
@@ -91,6 +92,13 @@ class Room:
         
         if len(self.points) < 3:
             return None
+
+        if not all(math.isfinite(p[0]) and math.isfinite(p[1]) for p in self.points):
+            return None
+        if self.holes:
+            for h in self.holes:
+                if not all(math.isfinite(p[0]) and math.isfinite(p[1]) for p in h):
+                    return None
         
         poly = Polygon(self.points, holes=self.holes or [])
         if poly.is_empty or not poly.is_valid:

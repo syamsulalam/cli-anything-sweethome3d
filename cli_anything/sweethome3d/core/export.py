@@ -127,9 +127,20 @@ def export_svg(model, filepath, level_id=None):
     # Render Rooms
     for r in rooms:
         if len(r.points) >= 3:
-            pts_str = " ".join(f"{p[0]:.1f},{p[1]:.1f}" for p in r.points)
             floor_color = r.floor_color if re.match(r"^#[0-9a-fA-F]{3,8}$|^[a-zA-Z]+$", r.floor_color) else "#EAEAEA"
-            svg_lines.append(f'    <polygon class="room" points="{pts_str}" fill="{floor_color}"/>')
+            if getattr(r, "holes", None):
+                # PAC-1 T07, E03, R19-P1-04: Compound path with evenodd fill rule for room holes
+                d_parts = []
+                shell_pts = " ".join(f"{p[0]:.2f} {p[1]:.2f}" for p in r.points)
+                d_parts.append(f"M {shell_pts} Z")
+                for hole in r.holes:
+                    hole_pts = " ".join(f"{p[0]:.2f} {p[1]:.2f}" for p in hole)
+                    d_parts.append(f"M {hole_pts} Z")
+                d_str = " ".join(d_parts)
+                svg_lines.append(f'    <path class="room" fill-rule="evenodd" d="{d_str}" fill="{floor_color}"/>')
+            else:
+                pts_str = " ".join(f"{p[0]:.1f},{p[1]:.1f}" for p in r.points)
+                svg_lines.append(f'    <polygon class="room" points="{pts_str}" fill="{floor_color}"/>')
             cx, cy = r.centroid
             safe_name = saxutils.escape(r.name)
             svg_lines.append(f'    <text class="room-label" x="{cx:.1f}" y="{cy - 8:.1f}">{safe_name}</text>')

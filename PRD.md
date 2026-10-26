@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.10.0 (PAC-1 Contract Iteration 19)  
+**Document Version:** 2.11.0 (PAC-1 Contract Iteration 20)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -195,6 +195,24 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
   - `output_error` called in strict validation (`VALIDATION_REJECTED`, exit code 3) with full validation findings and `allow_nan=False`. (`✅ Completed`)
 - [x] **Reconciled Test Suite**:
   - **147 total tests passing in 8.18s** (143 core + 4 E2E; all 14 Round 18 oracles green). (`✅ Completed`)
+
+### Phase 15: Sol Round 19 Prescriptions — Opening Metadata Ownership, DTD Ordering, Room Holes & Scale-Bounded Sector Budget (PAC-1 Iteration 20)
+- [x] **R19-P1-01: Dimension Endpoint Elevation Persistence (Gate N07, E07)**:
+  - `DimensionLine.to_dict()` and `from_dict()` emit and restore `elevation_start_cm` and `elevation_end_cm`, preventing flattening on session serialization. (`✅ Completed`)
+- [x] **R19-P1-02: Opening Metadata Ownership & Station Precedence (Gates N02, N09)**:
+  - In `from_xml()`, preserve `offset_cm` from `cli-anything.opening.v1` metadata without re-zeroing; strip namespaced property and `<sash>` from `extra_children`.
+  - In `to_xml()`, regenerate native sashes according to current `op.swing` and deduplicate metadata properties. (`✅ Completed`)
+- [x] **R19-P1-03: Native Child and Root Element DTD Ordering (Gates N03, N09)**:
+  - In `doorOrWindow`, order children: `DOOR_RANK = {"sash": 0, "property": 1, "textStyle": 2, "texture": 3, "material": 4, "transformation": 5}`.
+  - In root `home`, perform stable sort across all child elements using `ROOT_RANK` to ensure preserved elements like `<polyline>` precede `<dimensionLine>`. (`✅ Completed`)
+- [x] **R19-P1-04: Room Validity & SVG Hole Rendering (Gates T07, C05, E03)**:
+  - In `HomeModel.validate()`, reject non-finite hole coordinates, holes outside room shell polygon, and overlapping holes.
+  - In `core/export.py`, render holed rooms as compound SVG paths with `fill-rule="evenodd"` (`M shell... Z M hole... Z`). (`✅ Completed`)
+- [x] **R19-P1-05: Scale-Bounded Door Sector Representation Budget (Gates C04, C08)**:
+  - In `_make_door_sector_poly()`, derive steps from physical error budget $e \le 0.008$ cm: $d\theta = 4 \arcsin(\sqrt{\min(1, e / (2R))})$, $n = \max(32, \lceil|\theta| / d\theta\rceil)$, strictly bounding chord error to $\le 0.008\text{ cm} \le 0.01\text{ cm}$. (`✅ Completed`)
+- [x] **Reconciled Test Suite**:
+  - **159 total tests passing in 5.92s** (155 core + 4 E2E; all 12 Round 19 oracles green). (`✅ Completed`)
+
 
 
 
