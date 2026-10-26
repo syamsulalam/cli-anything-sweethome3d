@@ -7,7 +7,7 @@ class Wall:
     """
 
     def __init__(self, wall_id, x_start, y_start, x_end, y_end, thickness=15.0, height=280.0,
-                 level_id="level1", arc_extent=0.0):
+                 level_id="level1", arc_extent=0.0, extra_attribs=None, extra_children=None):
         self.id = str(wall_id)
         self.x_start = float(x_start)
         self.y_start = float(y_start)
@@ -17,6 +17,8 @@ class Wall:
         self.height = float(height)
         self.level_id = str(level_id)
         self.arc_extent = float(arc_extent)  # degrees; 0.0 = straight wall
+        self.extra_attribs = dict(extra_attribs) if extra_attribs else {}
+        self.extra_children = list(extra_children) if extra_children else []
 
     @property
     def x1(self):
@@ -37,16 +39,20 @@ class Wall:
     @property
     def chord_length(self):
         """Direct line distance between wall endpoints in centimeters."""
+        if not math.isfinite(self.x_start) or not math.isfinite(self.y_start) or not math.isfinite(self.x_end) or not math.isfinite(self.y_end):
+            return 0.0
         return math.hypot(self.x_end - self.x_start, self.y_end - self.y_start)
 
     @property
     def length(self):
         """Actual length of wall along its path in centimeters."""
         c = self.chord_length
-        if abs(self.arc_extent) < 1e-4:
+        if not math.isfinite(self.arc_extent) or abs(self.arc_extent) < 1e-4:
             return c
         # Arc length: L = r * theta_rad, where chord c = 2 * r * sin(theta_rad / 2)
         theta_rad = abs(math.radians(self.arc_extent))
+        if theta_rad >= 2.0 * math.pi:
+            return c
         sin_half = math.sin(theta_rad / 2.0)
         if abs(sin_half) < 1e-6:
             return c
@@ -80,14 +86,91 @@ class Wall:
         return round(deg, 1)
 
     def point_at_offset(self, offset_cm):
-        """Returns (x, y) along the wall center line at a given offset from start."""
+        """Returns (x, y) along the wall center line at a given offset from start.
+        
+        For curved walls with `arc_extent != 0`, computes exact points along circular arc.
+        """
         l = self.length
         if l == 0:
             return (self.x_start, self.y_start)
         t = max(0.0, min(1.0, offset_cm / l))
-        x = self.x_start + t * (self.x_end - self.x_start)
-        y = self.y_start + t * (self.y_end - self.y_start)
+        
+        if not math.isfinite(self.arc_extent) or abs(self.arc_extent) < 1e-4 or abs(self.arc_extent) >= 360.0:
+            x = self.x_start + t * (self.x_end - self.x_start)
+            y = self.y_start + t * (self.y_end - self.y_start)
+            return (round(x, 2), round(y, 2))
+
+        # Circular arc interpolation
+        c = self.chord_length
+        if c < 1e-6:
+            return (self.x_start, self.y_start)
+        
+        theta_rad = math.radians(self.arc_extent)
+        alpha = abs(theta_rad) / 2.0
+        sin_alpha = math.sin(alpha)
+        if abs(sin_alpha) < 1e-6:
+            x = self.x_start + t * (self.x_end - self.x_start)
+            y = self.y_start + t * (self.y_end - self.y_start)
+            return (round(x, 2), round(y, 2))
+
+        r = c / (2.0 * sin_alpha)
+        h = r * math.cos(alpha)
+
+        # Chord midpoint and unit normal vector
+        mx = (self.x_start + self.x_end) / 2.0
+        my = (self.y_start + self.y_end) / 2.0
+        dx = self.x_end - self.x_start
+        dy = self.y_end - self.y_start
+        nx = -dy / c
+        ny = dx / c
+
+        # Center of curvature: C = M - sign(arc_extent) * h * N
+        sign = 1.0 if self.arc_extent > 0 else -1.0
+        cx = mx - sign * h * nx
+        cy = my - sign * h * ny
+
+        phi1 = math.atan2(self.y_start - cy, self.x_start - cx)
+        # Direct signed angular sweep across full arc extent without minor-interval collapse
+        phi_t = phi1 - t * theta_rad
+        x = cx + r * math.cos(phi_t)
+        y = cy + r * math.sin(phi_t)
         return (round(x, 2), round(y, 2))
+
+    def get_arc_extrema(self):
+        """Returns list of exact (x, y) coordinates for all cardinal extrema reached along curved arc."""
+        if not math.isfinite(self.arc_extent) or abs(self.arc_extent) < 1e-4 or abs(self.arc_extent) >= 360.0:
+            return []
+        c = self.chord_length
+        if c < 1e-6:
+            return []
+        theta_rad = math.radians(self.arc_extent)
+        alpha = abs(theta_rad) / 2.0
+        sin_alpha = math.sin(alpha)
+        if abs(sin_alpha) < 1e-6:
+            return []
+        r = c / (2.0 * sin_alpha)
+        h = r * math.cos(alpha)
+        mx = (self.x_start + self.x_end) / 2.0
+        my = (self.y_start + self.y_end) / 2.0
+        nx = -(self.y_end - self.y_start) / c
+        ny = (self.x_end - self.x_start) / c
+        sign = 1.0 if self.arc_extent > 0 else -1.0
+        cx = mx - sign * h * nx
+        cy = my - sign * h * ny
+        phi1 = math.atan2(self.y_start - cy, self.x_start - cx)
+        phi2 = phi1 - theta_rad
+        min_phi = min(phi1, phi2)
+        max_phi = max(phi1, phi2)
+
+        extrema = []
+        k_min = math.ceil(min_phi / (math.pi / 2.0) - 1e-9)
+        k_max = math.floor(max_phi / (math.pi / 2.0) + 1e-9)
+        for k in range(k_min, k_max + 1):
+            angle = k * (math.pi / 2.0)
+            ex = cx + r * math.cos(angle)
+            ey = cy + r * math.sin(angle)
+            extrema.append((ex, ey))
+        return extrema
 
     def to_dict(self):
         return {
@@ -102,6 +185,8 @@ class Wall:
             "arc_extent": self.arc_extent,
             "length_m": self.length_m,
             "angle_deg": self.angle_deg,
+            "extra_attribs": self.extra_attribs,
+            "extra_children": self.extra_children,
         }
 
     @classmethod
@@ -116,4 +201,6 @@ class Wall:
             height=d.get("height", 280.0),
             level_id=d.get("level_id", "level1"),
             arc_extent=d.get("arc_extent", 0.0),
+            extra_attribs=d.get("extra_attribs"),
+            extra_children=d.get("extra_children"),
         )

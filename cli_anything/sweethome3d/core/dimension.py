@@ -8,7 +8,7 @@ class DimensionLine:
     """Represents an architectural dimension line in Sweet Home 3D."""
 
     def __init__(self, dimension_id, x_start, y_start, x_end, y_end, offset_cm=30.0,
-                 level_id="level1", elevation_cm=0.0):
+                 level_id="level1", elevation_cm=0.0, extra_attribs=None, extra_children=None):
         self.id = str(dimension_id)
         self.x_start = float(x_start)
         self.y_start = float(y_start)
@@ -17,6 +17,8 @@ class DimensionLine:
         self.offset_cm = float(offset_cm)
         self.level_id = str(level_id)
         self.elevation_cm = float(elevation_cm)
+        self.extra_attribs = dict(extra_attribs) if extra_attribs else {}
+        self.extra_children = list(extra_children) if extra_children else []
 
     @property
     def distance_cm(self):
@@ -76,6 +78,8 @@ class DimensionLine:
             "distance_m": self.distance_m,
             "length_m": self.distance_m,
             "length_cm": self.distance_cm,
+            "extra_attribs": self.extra_attribs,
+            "extra_children": self.extra_children,
         }
 
     @classmethod
@@ -89,4 +93,6 @@ class DimensionLine:
             offset_cm=d.get("offset_cm", 30.0),
             level_id=d.get("level_id", "level1"),
             elevation_cm=d.get("elevation_cm", 0.0),
+            extra_attribs=d.get("extra_attribs"),
+            extra_children=d.get("extra_children"),
         )

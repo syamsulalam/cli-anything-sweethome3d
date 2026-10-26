@@ -17,7 +17,7 @@ from cli_anything.sweethome3d.utils.repl_skin import ReplSkin
 from cli_anything.sweethome3d.utils.sweethome3d_backend import find_sweethome3d, launch_gui, get_install_instructions
 
 session_mgr = SessionManager()
-skin = ReplSkin("sweethome3d", version="1.1.0")
+skin = ReplSkin("sweethome3d", version="1.2.0")
 
 def output_result(ctx, data, human_formatter=None):
     """Outputs data either as JSON or human-readable format based on context flag."""
@@ -119,8 +119,9 @@ def project_info(ctx):
     output_result(ctx, data, human_formatter=formatter)
 
 @project.command(name="validate")
+@click.option("--strict", is_flag=True, help="Exit with non-zero status if validation fails.")
 @click.pass_context
-def project_validate(ctx):
+def project_validate(ctx, strict):
     """Run architectural constraint and closure validation checks."""
     val = session_mgr.model.validate()
     def formatter(d):
@@ -133,6 +134,44 @@ def project_validate(ctx):
         for warn in d["warnings"]:
             skin.warning(f"Warning: {warn}")
     output_result(ctx, val, human_formatter=formatter)
+    if strict and (not val["valid"] or len(val["warnings"]) > 0):
+        ctx.exit(1)
+
+@project.command(name="template")
+@click.option("--type", "template_type", type=click.Choice(["type36", "type45", "studio", "pavilion"], case_sensitive=False),
+              required=True, help="Standard architectural typology to apply.")
+@click.option("--name", default=None, help="Custom project title for the template.")
+@click.pass_context
+def project_template(ctx, template_type, name):
+    """Apply a pre-built architectural typology template (Type 36, Type 45, Studio, Pavilion)."""
+    from cli_anything.sweethome3d.core.templates import apply_template
+    try:
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            apply_template(session_mgr.model, template_type, name=name)
+            session_mgr.save_session()
+    except Exception as e:
+        output_error(ctx, str(e))
+    data = {
+        "status": "success",
+        "template": template_type,
+        "name": session_mgr.model.name,
+        "summary": {
+            "walls_count": len(session_mgr.model.walls),
+            "rooms_count": len(session_mgr.model.rooms),
+            "openings_count": len(session_mgr.model.openings),
+            "furniture_count": len(session_mgr.model.furniture),
+            "total_area_m2": session_mgr.model.total_area_m2,
+        }
+    }
+    def formatter(d):
+        skin.success(f"Applied template '{d['template']}' ({d['name']}).")
+        skin.status("Total Area", f"{d['summary']['total_area_m2']:.2f} m²")
+        skin.status("Walls", d['summary']['walls_count'])
+        skin.status("Rooms", d['summary']['rooms_count'])
+        skin.status("Openings", d['summary']['openings_count'])
+        skin.status("Furniture", d['summary']['furniture_count'])
+    output_result(ctx, data, human_formatter=formatter)
 
 @project.command(name="takeoff")
 @click.pass_context
@@ -175,10 +214,14 @@ def wall():
 def wall_add(ctx, wall_id, x1, y1, x2, y2, thickness, height, level_id, arc_extent):
     """Add a new wall segment (straight or curved)."""
     target_lvl = level_id or session_mgr.current_level_id
-    session_mgr.push_state()
-    w = session_mgr.model.add_wall(wall_id, x1, y1, x2, y2, thickness, height, target_lvl, arc_extent)
-    session_mgr.save_session()
-    output_result(ctx, w.to_dict())
+    try:
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            w = session_mgr.model.add_wall(wall_id, x1, y1, x2, y2, thickness, height, target_lvl, arc_extent)
+            session_mgr.save_session()
+        output_result(ctx, w.to_dict())
+    except Exception as e:
+        output_error(ctx, str(e))
 
 @wall.command(name="add-loop")
 @click.option("--prefix", "--id-prefix", "id_prefix", default="w_", help="Prefix for generated wall IDs (e.g. 'w_').")
@@ -200,10 +243,11 @@ def wall_add_loop(ctx, id_prefix, points, closed, thickness, height, level_id):
     except Exception as e:
         output_error(ctx, f"Invalid points format: {e}")
 
-    session_mgr.push_state()
     try:
-        created = session_mgr.model.add_wall_loop(pts, prefix=id_prefix, closed=closed, thickness=thickness, height=height, level_id=target_lvl)
-        session_mgr.save_session()
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            created = session_mgr.model.add_wall_loop(pts, prefix=id_prefix, closed=closed, thickness=thickness, height=height, level_id=target_lvl)
+            session_mgr.save_session()
         data = [w.to_dict() for w in created]
         output_result(ctx, {"created_count": len(created), "created_walls": data, "walls": data})
     except Exception as e:
@@ -233,13 +277,16 @@ def wall_list(ctx, level_id):
 @click.pass_context
 def wall_remove(ctx, wall_id):
     """Remove a wall by its ID."""
-    session_mgr.push_state()
-    removed = session_mgr.model.remove_wall(wall_id)
-    session_mgr.save_session()
-    if removed:
+    try:
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            removed = session_mgr.model.remove_wall(wall_id)
+            if not removed:
+                raise ValueError(f"Wall '{wall_id}' not found.")
+            session_mgr.save_session()
         output_result(ctx, {"removed": wall_id})
-    else:
-        output_error(ctx, f"Wall '{wall_id}' not found.")
+    except Exception as e:
+        output_error(ctx, str(e))
 
 # ==============================================================================
 # 3. Room Commands
@@ -273,13 +320,17 @@ def room_add(ctx, room_id, name, points, color, level_id, with_walls, wall_thick
     except Exception as e:
         output_error(ctx, f"Invalid points format: {e}")
 
-    session_mgr.push_state()
-    r = session_mgr.model.add_room(room_id, name, pts, level_id=target_lvl, floor_color=color,
-                                   with_walls=with_walls, wall_thickness=wall_thickness)
-    session_mgr.save_session()
-    res = r.to_dict()
-    res["with_walls"] = with_walls
-    output_result(ctx, res)
+    try:
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            r = session_mgr.model.add_room(room_id, name, pts, level_id=target_lvl, floor_color=color,
+                                           with_walls=with_walls, wall_thickness=wall_thickness)
+            session_mgr.save_session()
+        res = r.to_dict()
+        res["with_walls"] = with_walls
+        output_result(ctx, res)
+    except Exception as e:
+        output_error(ctx, str(e))
 
 @room.command(name="list")
 @click.option("--level", "level_id", default=None, help="Filter by level ID.")
@@ -305,13 +356,16 @@ def room_list(ctx, level_id):
 @click.pass_context
 def room_remove(ctx, room_id):
     """Remove a room by ID."""
-    session_mgr.push_state()
-    removed = session_mgr.model.remove_room(room_id)
-    session_mgr.save_session()
-    if removed:
+    try:
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            removed = session_mgr.model.remove_room(room_id)
+            if not removed:
+                raise ValueError(f"Room '{room_id}' not found.")
+            session_mgr.save_session()
         output_result(ctx, {"removed": room_id})
-    else:
-        output_error(ctx, f"Room '{room_id}' not found.")
+    except Exception as e:
+        output_error(ctx, str(e))
 
 @room.command(name="area")
 @click.argument("room_id")
@@ -343,12 +397,13 @@ def opening():
 @click.pass_context
 def opening_add(ctx, opening_id, name, wall_id, offset, width, height, opening_type, swing):
     """Add a door or window opening on a wall."""
-    session_mgr.push_state()
     try:
-        op = session_mgr.model.add_opening(opening_id, name, wall_id, offset, width, height, opening_type, swing)
-        session_mgr.save_session()
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            op = session_mgr.model.add_opening(opening_id, name, wall_id, offset, width, height, opening_type, swing)
+            session_mgr.save_session()
         output_result(ctx, op.to_dict())
-    except ValueError as e:
+    except Exception as e:
         output_error(ctx, str(e))
 
 @opening.command(name="list")
@@ -370,13 +425,16 @@ def opening_list(ctx):
 @click.pass_context
 def opening_remove(ctx, opening_id):
     """Remove a door or window by ID."""
-    session_mgr.push_state()
-    removed = session_mgr.model.remove_opening(opening_id)
-    session_mgr.save_session()
-    if removed:
+    try:
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            removed = session_mgr.model.remove_opening(opening_id)
+            if not removed:
+                raise ValueError(f"Opening '{opening_id}' not found.")
+            session_mgr.save_session()
         output_result(ctx, {"removed": opening_id})
-    else:
-        output_error(ctx, f"Opening '{opening_id}' not found.")
+    except Exception as e:
+        output_error(ctx, str(e))
 
 # ==============================================================================
 # 5. Furniture Commands
@@ -421,10 +479,14 @@ def furniture_add(ctx, furniture_id, name, catalog_id, x, y, elevation, width, d
     d = depth or cat_entry.get("depth", 100.0)
     h = height or cat_entry.get("height", 80.0)
 
-    session_mgr.push_state()
-    f = session_mgr.model.add_furniture(furniture_id, item_name, catalog_id, x, y, elevation, w, d, h, angle, target_lvl)
-    session_mgr.save_session()
-    output_result(ctx, f.to_dict())
+    try:
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            f = session_mgr.model.add_furniture(furniture_id, item_name, catalog_id, x, y, elevation, w, d, h, angle, target_lvl)
+            session_mgr.save_session()
+        output_result(ctx, f.to_dict())
+    except Exception as e:
+        output_error(ctx, str(e))
 
 @furniture.command(name="list")
 @click.option("--level", "level_id", default=None, help="Filter by level ID.")
@@ -450,13 +512,16 @@ def furniture_list(ctx, level_id):
 @click.pass_context
 def furniture_remove(ctx, furniture_id):
     """Remove furniture item by ID."""
-    session_mgr.push_state()
-    removed = session_mgr.model.remove_furniture(furniture_id)
-    session_mgr.save_session()
-    if removed:
+    try:
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            removed = session_mgr.model.remove_furniture(furniture_id)
+            if not removed:
+                raise ValueError(f"Furniture '{furniture_id}' not found.")
+            session_mgr.save_session()
         output_result(ctx, {"removed": furniture_id})
-    else:
-        output_error(ctx, f"Furniture '{furniture_id}' not found.")
+    except Exception as e:
+        output_error(ctx, str(e))
 
 # ==============================================================================
 # 6. Dimension Line Commands
@@ -478,10 +543,14 @@ def dimension():
 def dimension_add(ctx, dimension_id, x1, y1, x2, y2, offset, level_id):
     """Add an architectural dimension callout line."""
     target_lvl = level_id or session_mgr.current_level_id
-    session_mgr.push_state()
-    dim = session_mgr.model.add_dimension(dimension_id, x1, y1, x2, y2, offset, target_lvl)
-    session_mgr.save_session()
-    output_result(ctx, dim.to_dict())
+    try:
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            dim = session_mgr.model.add_dimension(dimension_id, x1, y1, x2, y2, offset, target_lvl)
+            session_mgr.save_session()
+        output_result(ctx, dim.to_dict())
+    except Exception as e:
+        output_error(ctx, str(e))
 
 @dimension.command(name="list")
 @click.option("--level", "level_id", default=None, help="Filter by level ID.")
@@ -507,13 +576,16 @@ def dimension_list(ctx, level_id):
 @click.pass_context
 def dimension_remove(ctx, dimension_id):
     """Remove a dimension line by ID."""
-    session_mgr.push_state()
-    removed = session_mgr.model.remove_dimension(dimension_id)
-    session_mgr.save_session()
-    if removed:
+    try:
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            removed = session_mgr.model.remove_dimension(dimension_id)
+            if not removed:
+                raise ValueError(f"Dimension '{dimension_id}' not found.")
+            session_mgr.save_session()
         output_result(ctx, {"removed": dimension_id})
-    else:
-        output_error(ctx, f"Dimension '{dimension_id}' not found.")
+    except Exception as e:
+        output_error(ctx, str(e))
 
 # ==============================================================================
 # 7. Level Commands
@@ -531,10 +603,14 @@ def level():
 @click.pass_context
 def level_add(ctx, level_id, name, elevation, height):
     """Add a new storey level."""
-    session_mgr.push_state()
-    lvl = session_mgr.model.add_level(level_id, name, elevation, height)
-    session_mgr.save_session()
-    output_result(ctx, lvl.to_dict())
+    try:
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            lvl = session_mgr.model.add_level(level_id, name, elevation, height)
+            session_mgr.save_session()
+        output_result(ctx, lvl.to_dict())
+    except Exception as e:
+        output_error(ctx, str(e))
 
 @level.command(name="set-current")
 @click.argument("level_id", required=False)

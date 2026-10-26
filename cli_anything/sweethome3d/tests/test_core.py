@@ -1,6 +1,11 @@
 import os
+import math
 import tempfile
 import zipfile
+import json
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from unittest.mock import patch
 import pytest
 
 from cli_anything.sweethome3d.core.wall import Wall
@@ -9,8 +14,8 @@ from cli_anything.sweethome3d.core.opening import Opening
 from cli_anything.sweethome3d.core.furniture import Furniture, FURNITURE_CATALOG
 from cli_anything.sweethome3d.core.dimension import DimensionLine
 from cli_anything.sweethome3d.core.project import HomeModel
-from cli_anything.sweethome3d.core.session import SessionManager, _locked_save_json
-from cli_anything.sweethome3d.core.export import export_html
+from cli_anything.sweethome3d.core.session import SessionManager, _locked_save_json, ConcurrencyConflictError
+from cli_anything.sweethome3d.core.export import export_html, export_svg, calculate_bounds
 
 def test_wall_properties():
     # 6m wall horizontal
@@ -261,3 +266,701 @@ def test_html_export():
     finally:
         if os.path.exists(html_path):
             os.remove(html_path)
+
+def test_arc_exact_sagitta_point_at_offset():
+    model = HomeModel()
+    arc = model.add_wall("arc", 0, 0, 400, 0, arc_extent=90)
+    p = arc.point_at_offset(arc.length / 2)
+    expected_sagitta = 200 / math.sin(math.pi / 4) * (1 - math.cos(math.pi / 4))
+    assert math.isclose(p[1], expected_sagitta, abs_tol=0.01)
+
+def test_invalid_model_validation_catches_errors():
+    invalid = HomeModel()
+    invalid.add_wall("w_bad", 0, 0, 100, 0, thickness=-10, height=-20, level_id="missing")
+    invalid.add_opening("bad_op", "Bad", "w_bad", -50, -30, -10)
+    v = invalid.validate()
+    assert v["valid"] is False
+    assert len(v["errors"]) >= 4
+
+def test_history_persists_across_restart():
+    with tempfile.TemporaryDirectory() as tmp:
+        history = SessionManager(os.path.join(tmp, "history.json"))
+        history.push_state()
+        history.model.add_wall("w_test", 0, 0, 100, 0)
+        history.save_session()
+        
+        reloaded = SessionManager(history.session_path)
+        ok, msg = reloaded.undo()
+        assert ok is True
+
+def test_door_swing_svg_distinct():
+    m = HomeModel(name="Swing Test")
+    m.add_wall("w1", 0, 0, 400, 0)
+    m.add_opening("d", "Door", "w1", offset_cm=50, width_cm=80, swing="right")
+    
+    with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as f:
+        p_right = f.name
+    with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as f:
+        p_left = f.name
+    try:
+        export_svg(m, p_right)
+        svg_right = open(p_right, "r", encoding="utf-8").read()
+        m.openings["d"].swing = "left"
+        export_svg(m, p_left)
+        svg_left = open(p_left, "r", encoding="utf-8").read()
+        assert svg_right != svg_left
+    finally:
+        if os.path.exists(p_right):
+            os.remove(p_right)
+        if os.path.exists(p_left):
+            os.remove(p_left)
+
+def test_roundtrip_preservation_of_unmodeled_xml_and_zip_entries():
+    xml_src = """<?xml version="1.0" encoding="utf-8"?>
+<home version="7.5" name="Test Extra" customRootProp="preserved123">
+  <level id="level1" name="Ground Floor" elevation="0.0" height="280.0" floorThickness="12.0"/>
+  <wall id="w1" level="level1" xStart="0.0" yStart="0.0" xEnd="400.0" yEnd="0.0" thickness="15.0" height="280.0"/>
+  <camera x="100.0" y="200.0" z="170.0" fieldOfView="1.0"/>
+  <observer camera="cam1"/>
+</home>
+"""
+    archive_path = os.path.join(tempfile.gettempdir(), "test_extra_unit.sh3d")
+    out_path = os.path.join(tempfile.gettempdir(), "saved_roundtrip_unit.sh3d")
+    try:
+        import zipfile
+        with zipfile.ZipFile(archive_path, "w") as z:
+            z.writestr("Home.xml", xml_src)
+            z.writestr("textures/wood.png", b"fake-png-bytes")
+            z.writestr("Plugin.properties", b"key=value")
+
+        m = HomeModel.load_sh3d(archive_path)
+        assert "customRootProp" in m.extra_root_attribs
+        assert len(m.extra_elements) == 2
+        assert "textures/wood.png" in m.extra_zip_entries
+
+        m.save_sh3d(out_path)
+        with zipfile.ZipFile(out_path, "r") as z:
+            names = z.namelist()
+            assert "Home.xml" in names
+            assert "textures/wood.png" in names
+            assert "Plugin.properties" in names
+            assert z.read("textures/wood.png") == b"fake-png-bytes"
+            xml_out = z.read("Home.xml").decode("utf-8")
+            assert 'customRootProp="preserved123"' in xml_out
+            assert "<camera" in xml_out
+            assert "<observer" in xml_out
+    finally:
+        if os.path.exists(archive_path):
+            os.remove(archive_path)
+        if os.path.exists(out_path):
+            os.remove(out_path)
+
+def test_major_arc_270_traces_full_path():
+    model = HomeModel()
+    arc = model.add_wall("arc", 0, 0, 400, 0, arc_extent=270)
+    points = [arc.point_at_offset(arc.length * i / 200) for i in range(201)]
+    sampled = sum(math.dist(a, b) for a, b in zip(points, points[1:]))
+    assert arc.length > 1300
+    assert sampled > 1300
+    assert abs(sampled - arc.length) < 0.1
+
+def test_door_swing_arc_centers_match_hinges():
+    import re
+    def svg_arc_center(x1, y1, x2, y2, r, large_arc, sweep):
+        dx2 = (x1 - x2) / 2.0
+        dy2 = (y1 - y2) / 2.0
+        d = math.hypot(dx2, dy2)
+        sq = max(0.0, (r*r - d*d) / (d*d))
+        factor = math.sqrt(sq)
+        if large_arc == sweep:
+            factor = -factor
+        cx_p = factor * dy2
+        cy_p = -factor * dx2
+        cx = cx_p + (x1 + x2)/2.0
+        cy = cy_p + (y1 + y2)/2.0
+        return round(cx, 2), round(cy, 2)
+
+    model = HomeModel()
+    model.add_wall("w1", 0, 0, 500, 0)
+    model.add_opening("d_r", "Door Right", "w1", offset_cm=50, width_cm=100, swing="right")
+    model.add_opening("d_l", "Door Left", "w1", offset_cm=250, width_cm=100, swing="left")
+
+    with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp:
+        p = tmp.name
+    try:
+        export_svg(model, p)
+        svg = open(p, "r", encoding="utf-8").read()
+        pattern = r'd="M ([-0-9.]+) ([-0-9.]+) A ([-0-9.]+) ([-0-9.]+) 0 ([01]) ([01]) ([-0-9.]+) ([-0-9.]+)"'
+        arcs = re.findall(pattern, svg)
+        assert len(arcs) == 2
+        for arc in arcs:
+            x1, y1, r1, r2, la, sw, x2, y2 = [float(v) for v in arc]
+            c = svg_arc_center(x1, y1, x2, y2, r1, int(la), int(sw))
+            if (x1, y1) == (150.0, 0.0):
+                assert c == (50.0, 0.0)  # Hinge at (50, 0)
+            elif (x1, y1) == (250.0, 0.0):
+                assert c == (350.0, 0.0)  # Hinge at (350, 0)
+    finally:
+        if os.path.exists(p):
+            os.remove(p)
+
+def test_non_finite_coordinates_rejected():
+    model = HomeModel()
+    model.add_wall("w_nan", float("nan"), 0, 100, 0)
+    val = model.validate()
+    assert val["valid"] is False
+    assert any(f["code"] == "NON_FINITE_COORDINATE" for f in val["findings"])
+
+def test_self_crossing_and_zero_area_rooms_rejected():
+    model = HomeModel()
+    model.add_room("r_cross", "Cross", [(0, 0), (100, 100), (0, 100), (100, 0)])
+    val = model.validate()
+    assert val["valid"] is False
+    assert any(f["code"] == "ROOM_SELF_INTERSECTION" for f in val["findings"])
+
+def test_rotated_furniture_obb_collision():
+    model = HomeModel()
+    model.add_furniture("a", "A", width_cm=200, depth_cm=20, angle_deg=90)
+    model.add_furniture("b", "B", y_cm=80, width_cm=20, depth_cm=20)
+    val = model.validate()
+    assert any(f["code"] == "FURNITURE_COLLISION" for f in val["findings"])
+
+def test_door_sweep_sector_furniture_collision():
+    model = HomeModel()
+    model.add_wall("w", 0, 0, 500, 0)
+    model.add_opening("d", "Door", "w", offset_cm=0, width_cm=100, swing="right")
+    model.add_furniture("f", "Desk", x_cm=160, y_cm=50, width_cm=140, depth_cm=20)
+    val = model.validate()
+    assert any(f["code"] == "DOOR_SWEEP_COLLISION" for f in val["findings"])
+
+def test_entity_unmodeled_attributes_and_nested_properties_preserved():
+    xml_src = """<?xml version="1.0" encoding="utf-8"?>
+<home version="7.5" name="Custom Home">
+  <level id="level1" name="Ground Floor" elevation="0.0" height="280.0" floorThickness="25.0" customLevelAttr="yes"/>
+  <wall id="w1" level="level1" xStart="0.0" yStart="0.0" xEnd="400.0" yEnd="0.0" thickness="15.0" height="280.0" leftSideColor="#112233">
+    <property name="material" value="brick"/>
+  </wall>
+</home>
+"""
+    m = HomeModel.from_xml(xml_src)
+    assert m.levels[0].floor_thickness_cm == 25.0
+    assert m.levels[0].extra_attribs.get("customLevelAttr") == "yes"
+    assert m.walls["w1"].extra_attribs.get("leftSideColor") == "#112233"
+    assert len(m.walls["w1"].extra_children) == 1
+
+    xml_out = m.to_xml()
+    assert 'floorThickness="25.0"' in xml_out
+    assert 'customLevelAttr="yes"' in xml_out
+    assert 'leftSideColor="#112233"' in xml_out
+    assert 'name="material"' in xml_out
+
+def test_level_filtered_json_excludes_dangling_openings():
+    from cli_anything.sweethome3d.core.export import export_json
+    model = HomeModel()
+    model.add_level("lvl2", "Second Floor", elevation_cm=300.0, height_cm=280.0)
+    model.add_wall("w1", 0, 0, 400, 0, level_id="level1")
+    model.add_wall("w2", 0, 0, 400, 0, level_id="lvl2")
+    model.add_opening("op1", "Door 1", "w1", offset_cm=50)
+    model.add_opening("op2", "Door 2", "w2", offset_cm=50)
+
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+        p = tmp.name
+    try:
+        export_json(model, p, level_id="level1")
+        import json
+        data = json.load(open(p, "r", encoding="utf-8"))
+        assert len(data["walls"]) == 1
+        assert data["walls"][0]["id"] == "w1"
+        assert len(data["openings"]) == 1
+        assert data["openings"][0]["id"] == "op1"
+    finally:
+        if os.path.exists(p):
+            os.remove(p)
+
+def test_default_concurrency_protection_and_rollback():
+    from cli_anything.sweethome3d.core.session import SessionManager, ConcurrencyConflictError
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "concurrency_test.json")
+        first, second = SessionManager(path), SessionManager(path)
+        first.model.add_wall("first", 0, 0, 100, 0)
+        first.save_session()  # Defaults to strict_concurrency=True
+
+        second.push_state()
+        second.model.add_wall("second", 0, 0, 100, 0)
+        import pytest
+        with pytest.raises(ConcurrencyConflictError):
+            second.save_session()  # Default strict_concurrency=True detects revision conflict
+
+        # Verify rollback restored second.model
+        assert "second" not in second.model.walls
+
+def test_corrupt_session_fails_closed():
+    from cli_anything.sweethome3d.core.session import SessionManager
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "corrupt.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{invalid json content")
+        import pytest
+        with pytest.raises(RuntimeError):
+            SessionManager(path)
+
+def test_door_sweep_arc_boundary_crossing_collision():
+    model = HomeModel()
+    model.add_wall("w", 0, 0, 500, 0)
+    model.add_opening("d", "Door", "w", 0, 100, swing="right")
+    model.add_furniture("f", "Arc crossing", x_cm=100 / math.sqrt(2),
+                        y_cm=100 / math.sqrt(2), width_cm=80,
+                        depth_cm=4, angle_deg=135)
+    val = model.validate()
+    assert any(f["code"] == "DOOR_SWEEP_COLLISION" for f in val["findings"])
+
+def test_native_opening_pose_and_elevation_preserved():
+    import xml.etree.ElementTree as ET
+    xml_src = """<home version="7500">
+  <level id="level1" name="Ground" elevation="0" height="280" floorThickness="25"/>
+  <doorOrWindow id="win" name="Window" level="level1" x="250" y="0"
+      elevation="90" width="120" depth="20" height="120" angle="0"/>
+  <wall id="w" level="level1" xStart="0" yStart="0" xEnd="500" yEnd="0"
+      thickness="15" height="280"/>
+</home>"""
+    m = HomeModel.from_xml(xml_src)
+    assert m.openings["win"].elevation_cm == 90.0
+    assert m.openings["win"].depth_cm == 20.0
+    
+    xml_out = m.to_xml()
+    elem = ET.fromstring(xml_out).find("doorOrWindow")
+    assert float(elem.get("elevation")) == 90.0
+    assert float(elem.get("depth")) == 20.0
+
+def test_all_four_templates_pass_strict_validation():
+    from cli_anything.sweethome3d.core.templates import apply_template
+    for typ in ["type36", "type45", "studio", "pavilion"]:
+        m = apply_template(HomeModel(), typ)
+        val = m.validate()
+        assert val["valid"] is True, f"Template '{typ}' failed validation: {val['errors']}"
+        assert len(val["warnings"]) == 0, f"Template '{typ}' has warnings: {val['warnings']}"
+
+def test_curved_wall_bounds_contain_major_arcs():
+    from cli_anything.sweethome3d.core.export import calculate_bounds
+    model = HomeModel()
+    model.add_wall("curved", 0, 0, 400, 0, arc_extent=270.0)
+    min_x, min_y, width, height = calculate_bounds(model, margin_cm=0.0)
+    # The apex of the 270 deg arc reaches y=482.84
+    assert min_y + height >= 480.0
+
+def test_invalid_arc_extent_and_domain_safety():
+    model = HomeModel()
+    model.add_wall("w_over", 0, 0, 400, 0, arc_extent=400.0)
+    val = model.validate()
+    assert val["valid"] is False
+    assert any(f["code"] == "INVALID_ARC_EXTENT" for f in val["findings"])
+
+    # Non-finite arc extent does not crash length or offset
+    w_nan = model.add_wall("w_nan", 0, 0, 400, 0, arc_extent=float("nan"))
+    assert w_nan.length >= 0.0
+    assert w_nan.point_at_offset(50.0) == (50.0, 0.0)
+
+def test_pending_push_prevents_spurious_rollback():
+    import json
+    import pytest
+    from unittest.mock import patch
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        path = f.name
+    try:
+        mgr = SessionManager(session_path=path)
+        mgr.new_project("Initial")
+        mgr.push_state()
+        mgr.model.add_wall("w1", 0, 0, 100, 0)
+        mgr.save_session()
+        assert len(mgr.undo_stack) == 2
+
+        # Induce revision conflict on disk
+        orig_stack_len = len(mgr.undo_stack)
+        with open(path, "w", encoding="utf-8") as fp:
+            json.dump({"revision": 9999}, fp)
+        
+        with pytest.raises(ConcurrencyConflictError):
+            mgr.save_session(strict_concurrency=True)
+        assert len(mgr.undo_stack) == orig_stack_len
+
+        # Test transactional undo rollback on persistence error
+        with patch("cli_anything.sweethome3d.core.session._locked_save_json", side_effect=OSError("disk error")):
+            with pytest.raises(RuntimeError):
+                mgr.undo()
+            # Model and stacks must be restored completely
+            assert "w1" in mgr.model.walls
+            assert len(mgr.undo_stack) == orig_stack_len
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+def test_door_sweep_vertical_interval_filtering():
+    model = HomeModel()
+    model.add_wall("w1", 0, 0, 500, 0)
+    # Opening at sill 100cm, height 120cm -> head 220cm
+    model.add_opening("d1", "Window/Door", "w1", offset_cm=50, width_cm=90, height_cm=120, elevation_cm=100.0)
+    # Furniture at z=0..80 (below opening sill)
+    model.add_furniture("f_low", "Low Table", catalog_id="custom", x_cm=95, y_cm=40, elevation_cm=0.0, height_cm=80.0, width_cm=50, depth_cm=50)
+    # Furniture at z=230..280 (above opening head)
+    model.add_furniture("f_high", "Ceiling Fan", catalog_id="custom", x_cm=95, y_cm=40, elevation_cm=230.0, height_cm=50.0, width_cm=50, depth_cm=50)
+    val = model.validate()
+    assert not any(f["code"] == "DOOR_SWEEP_COLLISION" for f in val["findings"])
+
+def test_sequential_template_application_updates_name():
+    from cli_anything.sweethome3d.core.templates import apply_template
+    model = HomeModel()
+    apply_template(model, "type36")
+    assert model.name == "Rumah Tipe 36"
+    apply_template(model, "type45")
+    assert model.name == "Rumah Tipe 45"
+    apply_template(model, "studio")
+    assert model.name == "Modern Studio 30m²"
+
+def test_extra_zip_entries_string_and_bytes_roundtrip():
+    model = HomeModel()
+    model.extra_zip_entries["text.txt"] = b"plain text content"
+    model.extra_zip_entries["binary.bin"] = b"\x00\x01\x02\xff"
+    d = model.to_dict()
+    model2 = HomeModel.from_dict(d)
+    assert model2.extra_zip_entries["text.txt"] == b"plain text content"
+    assert model2.extra_zip_entries["binary.bin"] == b"\x00\x01\x02\xff"
+
+def test_stale_save_file_does_not_overwrite_destination():
+    with tempfile.TemporaryDirectory() as td:
+        state = os.path.join(td, "session.json")
+        artifact = os.path.join(td, "home.json")
+        a = SessionManager(state)
+        a.new_project("base")
+        a.save_file(artifact)
+        b = SessionManager(state)
+        a.new_project("newer")
+        a.save_file(artifact)
+        with pytest.raises(ConcurrencyConflictError):
+            b.save_file(artifact)
+        with open(artifact, "r", encoding="utf-8") as fp:
+            assert json.load(fp)["name"] == "newer"
+
+def test_native_reversed_opening_pose_preserved_in_xml():
+    xml = """<home>
+      <wall id="w" xStart="0" yStart="0" xEnd="500" yEnd="0"/>
+      <doorOrWindow id="d" x="250" y="0" angle="3.141592653589793"
+        width="90" depth="20" height="210"/>
+    </home>"""
+    m = HomeModel.from_xml(xml)
+    assert m.openings["d"].angle_deg == 180.0
+    xml_out = m.to_xml()
+    elem = ET.fromstring(xml_out).find("doorOrWindow")
+    assert round(float(elem.get("angle")), 4) == round(math.pi, 4)
+
+def test_zero_chord_curved_wall_rejected_by_validator():
+    m = HomeModel()
+    m.add_wall("zeroarc", 0, 0, 0, 0, arc_extent=90)
+    val = m.validate()
+    assert val["valid"] is False
+    assert any(f["code"] == "ZERO_LENGTH_WALL" for f in val["findings"])
+
+def test_analytic_arc_extrema_bounding_scale_invariant():
+    from cli_anything.sweethome3d.core.export import calculate_bounds
+    m_huge = HomeModel()
+    m_huge.add_wall("huge", 0, 0, 40000, 0, arc_extent=270.0)
+    min_x, min_y, width, height = calculate_bounds(m_huge, margin_cm=100.0)
+    # Exact left extremum is cx - r = -8284.27.
+    assert min_x <= -8384.27
+
+def test_overlapping_openings_flagged_by_validator():
+    m = HomeModel()
+    m.add_wall("w1", 0, 0, 500, 0)
+    m.add_opening("d1", "Door 1", "w1", offset_cm=100, width_cm=90)
+    m.add_opening("d2", "Door 2", "w1", offset_cm=150, width_cm=90)
+    val = m.validate()
+    assert any(f["code"] == "OPENING_OVERLAP" for f in val["findings"])
+
+def test_repeated_persistence_failure_does_not_leak_flag_or_corrupt_history():
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as td:
+        state = os.path.join(td, "session.json")
+        c = SessionManager(state)
+        c.push_state()
+        c.model.add_wall("w", 0, 0, 100, 0)
+        c.save_session()
+        c.undo()
+        before = c._create_snapshot()
+        c.push_state()
+        c.model.add_wall("rejected", 0, 0, 200, 0)
+        with patch("cli_anything.sweethome3d.core.session._locked_save_json", side_effect=OSError("probe")):
+            for attempt in range(2):
+                with pytest.raises(RuntimeError):
+                    c.save_session()
+                assert c._pending_push is False
+                assert c._create_snapshot() == before
+        assert c._create_snapshot() == before
+        assert len(c.undo_stack) == len(before["undo_stack"])
+        assert len(c.redo_stack) == len(before["redo_stack"])
+
+def test_unhosted_and_authoritative_opening_sweep_collision():
+    m = HomeModel()
+    # Unhosted door at (250, 0) rotated 180 degrees
+    m.add_opening("d_rev", "Reversed Door", wall_id=None, width_cm=90, opening_type="door", swing="right", x_cm=250.0, y_cm=0.0, angle_deg=180.0)
+    # Furniture placed in its swing path at y = -40
+    m.add_furniture("f1", "Colliding Chair", catalog_id="chair", x_cm=250.0, y_cm=-40.0, width_cm=30, depth_cm=30)
+    val = m.validate()
+    assert any(f["code"] == "DOOR_SWEEP_COLLISION" for f in val["findings"])
+
+def test_two_phase_commit_destination_failure_reconciles_cleanly():
+    with tempfile.TemporaryDirectory() as td:
+        state = str(Path(td) / "session.json")
+        target = str(Path(td) / "never-created.json")
+        m = SessionManager(state)
+        m.new_project("base")
+        revision = m.revision
+        replace = os.replace
+
+        def reject_only_destination(src, dst):
+            if str(dst) == target:
+                raise PermissionError("probe: destination unavailable")
+            return replace(src, dst)
+
+        with patch("cli_anything.sweethome3d.core.session.os.replace", side_effect=reject_only_destination):
+            with pytest.raises(RuntimeError):
+                m.save_file(target)
+
+        disk = json.loads(Path(state).read_text())
+        assert not Path(target).exists()
+        assert disk["active_file"] != target
+        assert disk["revision"] == revision
+        assert m.revision == revision
+        m.save_session()
+
+def test_hosted_opening_svg_matches_native_pose_and_validation():
+    with tempfile.TemporaryDirectory() as td:
+        home = HomeModel.from_xml('''<home>
+          <wall id="w" xStart="0" yStart="0" xEnd="500" yEnd="0"/>
+          <doorOrWindow id="d" x="250" y="0" angle="3.141592653589793"
+            width="90" depth="20" height="210"/>
+        </home>''')
+        home.add_furniture("f", "Negative-side object", x_cm=250, y_cm=-40, width_cm=20, depth_cm=20)
+        assert any(f["code"] == "DOOR_SWEEP_COLLISION" for f in home.validate()["findings"])
+        svg = str(Path(td) / "home.svg")
+        export_svg(home, svg)
+        ns = {"s": "http://www.w3.org/2000/svg"}
+        leaf = ET.parse(svg).getroot().find(".//s:line[@class='door']", ns)
+        assert float(leaf.get("y2")) == -90.0
+
+def test_mutation_exception_transaction_leaves_history_untouched():
+    with tempfile.TemporaryDirectory() as td:
+        state = str(Path(td) / "session.json")
+        m = SessionManager(state)
+        m.new_project("base")
+        undo_len = len(m.undo_stack)
+        with pytest.raises(ValueError):
+            m.new_project("bad", wall_height="invalid")
+        assert len(m.undo_stack) == undo_len
+        assert getattr(m, "_tx_snapshot", None) is None
+        assert m._pending_push is False
+
+def test_operation_extents_included_in_bounding_box():
+    unhosted_model = HomeModel("Unhosted")
+    unhosted_model.add_opening("d_unhosted", "Front Door", x_cm=0, y_cm=0, angle_deg=0, width_cm=200, opening_type="door")
+    bx, by, bw, bh = calculate_bounds(unhosted_model, margin_cm=100.0)
+    assert by <= -100
+    assert by + bh >= 300
+
+def test_incomplete_pose_warning_and_validation():
+    incomp_model = HomeModel("Incomp")
+    incomp_model.add_opening("d_incomp", "No Angle Door", x_cm=100, y_cm=100, width_cm=90, opening_type="door")
+    incomp_model.add_furniture("f_coll", "Colliding", x_cm=100, y_cm=150, width_cm=30, depth_cm=30)
+    v = incomp_model.validate()
+    codes = [f["code"] for f in v["findings"]]
+    assert "INCOMPLETE_OPENING_POSE" in codes
+    assert "DOOR_SWEEP_COLLISION" in codes
+
+def test_duplicate_id_rejection():
+    m = HomeModel("DupCheck")
+    m.add_wall("w1", 0, 0, 100, 0)
+    with pytest.raises(ValueError, match="already exists"):
+        m.add_wall("w1", 0, 0, 200, 0)
+
+def test_live_writer_pending_journal_not_consumed_by_observer_and_occ_enforced():
+    with tempfile.TemporaryDirectory() as td:
+        state = str(Path(td) / "session.json")
+        target = str(Path(td) / "home.json")
+        a = SessionManager(state)
+        a.new_project("base")
+        a.save_file(target)
+        a.push_state()
+        a.model.name = "candidate"
+        real_replace = os.replace
+        observers = []
+
+        def load_during_publication(src, dst):
+            if str(dst) == target:
+                observer = SessionManager(state)
+                observers.append(observer)
+                assert observer.model.name == "base"
+                # The pending journal must NOT be deleted while writer holds lock!
+                assert Path(state + ".pending").exists()
+            return real_replace(src, dst)
+
+        with patch("cli_anything.sweethome3d.core.session.os.replace", side_effect=load_during_publication):
+            a.save_file(target)
+
+        disk = json.loads(Path(state).read_text())
+        assert disk["model"]["name"] == "candidate"
+        assert observers[0].revision < disk["revision"]
+        # Observer must be rejected due to OCC revision mismatch
+        with pytest.raises(RuntimeError, match="Session revision conflict|Concurrency conflict|modified"):
+            observers[0].save_session()
+        # Disk state is untouched and preserves candidate model
+        assert json.loads(Path(state).read_text())["model"]["name"] == "candidate"
+        assert json.loads(Path(target).read_text())["name"] == "candidate"
+
+def test_abrupt_exit_crash_recovery_rolls_forward_candidate_model():
+    with tempfile.TemporaryDirectory() as td:
+        state = str(Path(td) / "session.json")
+        target = str(Path(td) / "home.json")
+        a = SessionManager(state)
+        a.new_project("base")
+        a.save_file(target)
+        a.push_state()
+        a.model.name = "candidate_post_crash"
+        
+        real_replace = os.replace
+        def crash_after_target_publish(src, dst):
+            res = real_replace(src, dst)
+            if str(dst) == target:
+                # Simulate crash right after target published, before session.json was updated
+                raise KeyboardInterrupt("Simulated sudden power loss / kill")
+            return res
+
+        with patch("cli_anything.sweethome3d.core.session.os.replace", side_effect=crash_after_target_publish):
+            with pytest.raises(KeyboardInterrupt):
+                a.save_file(target)
+
+        # Journal is still on disk
+        assert Path(state + ".pending").exists()
+        # Fresh process boots up and recovers the session
+        recovery_mgr = SessionManager(state)
+        assert recovery_mgr.model.name == "candidate_post_crash"
+        assert not Path(state + ".pending").exists()
+        disk_session = json.loads(Path(state).read_text())
+        assert disk_session["model"]["name"] == "candidate_post_crash"
+        assert json.loads(Path(target).read_text())["name"] == "candidate_post_crash"
+
+def test_integer_id_normalization_duplicate_rejection():
+    m = HomeModel("NormalizeTest")
+    m.add_wall(1, 0, 0, 100, 0)
+    assert "1" in m.walls
+    with pytest.raises(ValueError, match="already exists"):
+        m.add_wall(1, 0, 0, 200, 0)
+    with pytest.raises(ValueError, match="already exists"):
+        m.add_wall("1", 0, 0, 200, 0)
+
+    m.add_room(10, "Living Room", [(0, 0), (100, 0), (100, 100), (0, 100)])
+    assert "10" in m.rooms
+    with pytest.raises(ValueError, match="already exists"):
+        m.add_room(10, "Living Room 2", [(0, 0), (50, 0), (50, 50), (0, 50)])
+
+    m.add_opening(20, "Door", wall_id="1", width_cm=90)
+    assert "20" in m.openings
+    with pytest.raises(ValueError, match="already exists"):
+        m.add_opening(20, "Door 2", wall_id="1", width_cm=90)
+
+    m.add_furniture(30, "Table", catalog_id="table", x_cm=50, y_cm=50)
+    assert "30" in m.furniture
+    with pytest.raises(ValueError, match="already exists"):
+        m.add_furniture(30, "Table 2", catalog_id="table", x_cm=50, y_cm=50)
+
+    m.add_dimension(40, 0, 0, 100, 0)
+    assert "40" in m.dimensions
+    with pytest.raises(ValueError, match="already exists"):
+        m.add_dimension(40, 0, 0, 100, 0)
+
+    m.add_level(2, "Upper Floor", elevation_cm=300.0)
+    assert m.get_level("2") is not None
+    with pytest.raises(ValueError, match="already exists"):
+        m.add_level(2, "Duplicate Level")
+    with pytest.raises(ValueError, match="already exists"):
+        m.add_level("2", "Duplicate Level String")
+
+def test_json_import_duplicate_id_rejection():
+    bad_wall_json = {
+        "name": "DupWall",
+        "walls": [
+            {"id": "w1", "x_start": 0, "y_start": 0, "x_end": 100, "y_end": 0},
+            {"id": "w1", "x_start": 0, "y_start": 0, "x_end": 200, "y_end": 0}
+        ]
+    }
+    with pytest.raises(ValueError, match="Duplicate wall ID 'w1'"):
+        HomeModel.from_dict(bad_wall_json)
+
+    bad_room_json = {
+        "name": "DupRoom",
+        "rooms": [
+            {"id": "r1", "name": "Room A", "points": [[0, 0], [100, 0], [100, 100], [0, 100]]},
+            {"id": "r1", "name": "Room B", "points": [[0, 0], [50, 0], [50, 50], [0, 50]]}
+        ]
+    }
+    with pytest.raises(ValueError, match="Duplicate room ID 'r1'"):
+        HomeModel.from_dict(bad_room_json)
+
+    bad_level_json = {
+        "name": "DupLevel",
+        "levels": [
+            {"id": "lvl1", "name": "Ground", "elevation_cm": 0},
+            {"id": "lvl1", "name": "Ground Duplicate", "elevation_cm": 0}
+        ]
+    }
+    with pytest.raises(ValueError, match="Duplicate level ID 'lvl1'"):
+        HomeModel.from_dict(bad_level_json)
+
+def test_cli_wall_add_duplicate_rejection_preserves_undo_redo_history():
+    from click.testing import CliRunner
+    from cli_anything.sweethome3d.sweethome3d_cli import cli
+    import cli_anything.sweethome3d.sweethome3d_cli as cli_mod
+
+    with tempfile.TemporaryDirectory() as td:
+        state_file = os.path.join(td, "cli_session.json")
+        orig_session_mgr = cli_mod.session_mgr
+        runner = CliRunner()
+        try:
+            cli_mod.session_mgr = SessionManager(state_file)
+            cli_mod.session_mgr.new_project("CLITest")
+            
+            # Step 1: Add initial wall w1
+            res = runner.invoke(cli, ["wall", "add", "--id", "w1", "--x1", "0", "--y1", "0", "--x2", "100", "--y2", "0"])
+            assert res.exit_code == 0
+            
+            # Step 2: Add wall w2
+            res = runner.invoke(cli, ["wall", "add", "--id", "w2", "--x1", "100", "--y1", "0", "--x2", "100", "--y2", "100"])
+            assert res.exit_code == 0
+            
+            # Step 3: Undo w2
+            res = runner.invoke(cli, ["session", "undo"])
+            assert res.exit_code == 0
+            
+            # Now undo stack has 2 items (initial, w1), redo stack has 1 item (w2)
+            undo_count_before = len(cli_mod.session_mgr.undo_stack)
+            redo_count_before = len(cli_mod.session_mgr.redo_stack)
+            assert undo_count_before == 2
+            assert redo_count_before == 1
+            
+            # Step 4: Attempt to add duplicate wall w1 -> must fail
+            res = runner.invoke(cli, ["wall", "add", "--id", "w1", "--x1", "0", "--y1", "0", "--x2", "200", "--y2", "0"])
+            assert res.exit_code != 0 or "Error" in res.output or "already exists" in res.output
+            
+            # Step 5: Verify undo and redo stacks are strictly preserved!
+            assert len(cli_mod.session_mgr.undo_stack) == undo_count_before
+            assert len(cli_mod.session_mgr.redo_stack) == redo_count_before
+            
+            # Step 6: Verify redo still works cleanly
+            res = runner.invoke(cli, ["session", "redo"])
+            assert res.exit_code == 0
+            assert "w2" in cli_mod.session_mgr.model.walls
+        finally:
+            cli_mod.session_mgr = orig_session_mgr
+
+
+
+
+
+

@@ -1,17 +1,21 @@
+import os
 from setuptools import setup, find_namespace_packages
 
-with open("SWEETHOME3D.md", "r", encoding="utf-8") as fh:
-    long_description = fh.read()
+doc_path = os.path.join(os.path.dirname(__file__), "SWEETHOME3D.md")
+long_description = ""
+if os.path.exists(doc_path):
+    with open(doc_path, "r", encoding="utf-8") as fh:
+        long_description = fh.read()
 
 setup(
     name="cli-anything-sweethome3d",
-    version="1.0.0",
+    version="1.2.0",
     author="Syamsul Alam & Gemini 3.8 Flash (Antigravity Orchestrator)",
     author_email="dev@codev.id",
     description="Agent-native CLI harness for Sweet Home 3D floor planning software",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/HKUDS/CLI-Anything",
+    url="https://github.com/syamsulalam/cli-anything-sweethome3d",
     packages=find_namespace_packages(include=["cli_anything.*"]),
     classifiers=[
         "Programming Language :: Python :: 3",

@@ -1,9 +1,12 @@
 import os
 import math
 import json
+import re
+import html
+import xml.sax.saxutils as saxutils
 
 def calculate_bounds(model, margin_cm=100.0, level_id=None):
-    """Calculates min/max bounding box coordinates in cm across walls and rooms."""
+    """Calculates min/max bounding box coordinates in cm across walls, rooms, and furniture."""
     xs = []
     ys = []
     walls = [w for w in model.walls.values() if not level_id or w.level_id == level_id]
@@ -12,15 +15,41 @@ def calculate_bounds(model, margin_cm=100.0, level_id=None):
     dimensions = [d for d in model.dimensions.values() if not level_id or d.level_id == level_id]
 
     for w in walls:
-        xs.extend([w.x_start, w.x_end])
-        ys.extend([w.y_start, w.y_end])
+        t = w.thickness / 2.0
+        xs.extend([w.x_start - t, w.x_start + t, w.x_end - t, w.x_end + t])
+        ys.extend([w.y_start - t, w.y_start + t, w.y_end - t, w.y_end + t])
+        if abs(w.arc_extent) > 1e-4 and w.length > 0:
+            for ex, ey in w.get_arc_extrema():
+                xs.extend([ex - t, ex + t])
+                ys.extend([ey - t, ey + t])
+            for step in range(1, 16):
+                pt = w.point_at_offset(w.length * (step / 16.0))
+                xs.extend([pt[0] - t, pt[0] + t])
+                ys.extend([pt[1] - t, pt[1] + t])
+    for op in model.openings.values():
+        if not level_id or op.level_id == level_id:
+            wall = model.walls.get(op.wall_id)
+            geom = op.get_effective_geometry(wall)
+            if geom:
+                p1 = geom["p1"]
+                p2 = geom["p2"]
+                xs.extend([p1[0], p2[0]])
+                ys.extend([p1[1], p2[1]])
+                if op.opening_type == "door":
+                    hinge = geom["hinge"]
+                    w = geom["width"]
+                    if op.swing in ("left", "right"):
+                        p_open = geom["open_endpoint"]
+                        xs.extend([p_open[0], hinge[0] - w, hinge[0] + w])
+                        ys.extend([p_open[1], hinge[1] - w, hinge[1] + w])
     for r in rooms:
         for p in r.points:
             xs.append(p[0])
             ys.append(p[1])
     for f in furniture:
-        xs.append(f.x_cm)
-        ys.append(f.y_cm)
+        radius = math.hypot(f.width_cm / 2.0, f.depth_cm / 2.0)
+        xs.extend([f.x_cm - radius, f.x_cm + radius])
+        ys.extend([f.y_cm - radius, f.y_cm + radius])
     for dim in dimensions:
         p1, p2 = dim.offset_endpoints
         xs.extend([dim.x_start, dim.x_end, p1[0], p2[0]])
@@ -45,7 +74,11 @@ def export_svg(model, filepath, level_id=None):
 
     walls = [w for w in model.walls.values() if not level_id or w.level_id == level_id]
     rooms = [r for r in model.rooms.values() if not level_id or r.level_id == level_id]
-    openings = [op for op in model.openings.values() if op.wall_id in {w.id for w in walls}]
+    wall_ids = {w.id for w in walls}
+    openings = [
+        op for op in model.openings.values()
+        if op.wall_id in wall_ids or (not op.wall_id and (not level_id or op.level_id == level_id))
+    ]
     furniture = [f for f in model.furniture.values() if not level_id or f.level_id == level_id]
     dimensions = [dim for dim in model.dimensions.values() if not level_id or dim.level_id == level_id]
 
@@ -83,9 +116,11 @@ def export_svg(model, filepath, level_id=None):
     for r in rooms:
         if len(r.points) >= 3:
             pts_str = " ".join(f"{p[0]:.1f},{p[1]:.1f}" for p in r.points)
-            svg_lines.append(f'    <polygon class="room" points="{pts_str}" fill="{r.floor_color}"/>')
+            floor_color = r.floor_color if re.match(r"^#[0-9a-fA-F]{3,8}$|^[a-zA-Z]+$", r.floor_color) else "#EAEAEA"
+            svg_lines.append(f'    <polygon class="room" points="{pts_str}" fill="{floor_color}"/>')
             cx, cy = r.centroid
-            svg_lines.append(f'    <text class="room-label" x="{cx:.1f}" y="{cy - 8:.1f}">{r.name}</text>')
+            safe_name = saxutils.escape(r.name)
+            svg_lines.append(f'    <text class="room-label" x="{cx:.1f}" y="{cy - 8:.1f}">{safe_name}</text>')
             svg_lines.append(f'    <text class="room-area" x="{cx:.1f}" y="{cy + 16:.1f}">{r.area_m2:.2f} m²</text>')
 
     svg_lines.extend([
@@ -99,6 +134,7 @@ def export_svg(model, filepath, level_id=None):
     for f in furniture:
         w = f.width_cm
         d = f.depth_cm
+        safe_name = saxutils.escape(f.name)
         svg_lines.append(
             f'    <g transform="translate({f.x_cm:.1f}, {f.y_cm:.1f}) rotate({f.angle_deg:.1f})">'
         )
@@ -106,7 +142,7 @@ def export_svg(model, filepath, level_id=None):
             f'      <rect class="furniture" x="{-w/2.0:.1f}" y="{-d/2.0:.1f}" width="{w:.1f}" height="{d:.1f}" rx="4"/>'
         )
         svg_lines.append(
-            f'      <text class="furniture-label" x="0" y="4">{f.name}</text>'
+            f'      <text class="furniture-label" x="0" y="4">{safe_name}</text>'
         )
         svg_lines.append(f'    </g>')
 
@@ -131,7 +167,8 @@ def export_svg(model, filepath, level_id=None):
             sin_half = math.sin(theta_rad / 2.0)
             r = c / (2.0 * sin_half) if abs(sin_half) > 1e-6 else c
             large_arc = 1 if abs(w.arc_extent) > 180.0 else 0
-            sweep = 1 if w.arc_extent > 0 else 0
+            # Sweep matches point_at_offset: 0 for positive arc_extent (+Y bulge), 1 for negative
+            sweep = 0 if w.arc_extent > 0 else 1
             svg_lines.append(
                 f'    <path class="wall" d="M {w.x_start:.1f} {w.y_start:.1f} '
                 f'A {r:.1f} {r:.1f} 0 {large_arc} {sweep} {w.x_end:.1f} {w.y_end:.1f}" '
@@ -148,33 +185,61 @@ def export_svg(model, filepath, level_id=None):
     # Render Openings
     for op in openings:
         wall = model.walls.get(op.wall_id)
+        geom = op.get_effective_geometry(wall)
+        if not geom:
+            continue
+
+        p1 = geom["p1"]
+        p2 = geom["p2"]
+        w = geom["width"]
+        ux, uy = geom["ux"], geom["uy"]
+        nx, ny = geom["nx"], geom["ny"]
+        hinge = geom["hinge"]
+        latch = geom["latch"]
+        p_open = geom["open_endpoint"]
+
         if wall:
-            p1 = wall.point_at_offset(op.offset_cm)
-            p2 = wall.point_at_offset(op.offset_cm + op.width_cm)
-            if op.opening_type == "door":
-                # Door gap
+            # Punch opening gap in wall
+            svg_lines.append(
+                f'    <line stroke="#ffffff" stroke-width="{wall.thickness + 2:.1f}" '
+                f'x1="{p1[0]:.1f}" y1="{p1[1]:.1f}" x2="{p2[0]:.1f}" y2="{p2[1]:.1f}"/>'
+            )
+
+        if op.opening_type == "door":
+            if op.swing == "sliding":
+                mid_x = (p1[0] + p2[0]) / 2.0
+                mid_y = (p1[1] + p2[1]) / 2.0
                 svg_lines.append(
-                    f'    <line stroke="#ffffff" stroke-width="{wall.thickness + 2:.1f}" '
-                    f'x1="{p1[0]:.1f}" y1="{p1[1]:.1f}" x2="{p2[0]:.1f}" y2="{p2[1]:.1f}"/>'
+                    f'    <line class="door" x1="{p1[0]:.1f}" y1="{p1[1]:.1f}" x2="{mid_x + 5 * ux:.1f}" y2="{mid_y + 5 * uy:.1f}"/>'
                 )
-                # Door leaf
                 svg_lines.append(
-                    f'    <line class="door" x1="{p1[0]:.1f}" y1="{p1[1]:.1f}" x2="{p2[0]:.1f}" y2="{p2[1]:.1f}"/>'
+                    f'    <line class="door" stroke-dasharray="4,2" x1="{mid_x - 5 * ux + 3 * nx:.1f}" y1="{mid_y - 5 * uy + 3 * ny:.1f}" x2="{p2[0] + 3 * nx:.1f}" y2="{p2[1] + 3 * ny:.1f}"/>'
                 )
-                # Door swing arc
-                r_cm = op.width_cm
+            elif op.swing == "none":
+                if not wall:
+                    svg_lines.append(
+                        f'    <line stroke="#aaaaaa" stroke-dasharray="3,3" stroke-width="2" x1="{p1[0]:.1f}" y1="{p1[1]:.1f}" x2="{p2[0]:.1f}" y2="{p2[1]:.1f}"/>'
+                    )
+            elif op.swing == "left":
                 svg_lines.append(
-                    f'    <path class="door-arc" d="M {p1[0]:.1f} {p1[1]:.1f} A {r_cm:.1f} {r_cm:.1f} 0 0 1 {p2[0]:.1f} {p2[1]:.1f}"/>'
+                    f'    <line class="door" x1="{hinge[0]:.1f}" y1="{hinge[1]:.1f}" x2="{p_open[0]:.1f}" y2="{p_open[1]:.1f}"/>'
+                )
+                svg_lines.append(
+                    f'    <path class="door-arc" d="M {latch[0]:.1f} {latch[1]:.1f} A {w:.1f} {w:.1f} 0 0 0 {p_open[0]:.1f} {p_open[1]:.1f}"/>'
                 )
             else:
-                # Window gap + glass line
+                # Default right swing
                 svg_lines.append(
-                    f'    <line stroke="#ffffff" stroke-width="{wall.thickness + 2:.1f}" '
-                    f'x1="{p1[0]:.1f}" y1="{p1[1]:.1f}" x2="{p2[0]:.1f}" y2="{p2[1]:.1f}"/>'
+                    f'    <line class="door" x1="{hinge[0]:.1f}" y1="{hinge[1]:.1f}" x2="{p_open[0]:.1f}" y2="{p_open[1]:.1f}"/>'
                 )
                 svg_lines.append(
-                    f'    <line class="window" x1="{p1[0]:.1f}" y1="{p1[1]:.1f}" x2="{p2[0]:.1f}" y2="{p2[1]:.1f}"/>'
+                    f'    <path class="door-arc" d="M {latch[0]:.1f} {latch[1]:.1f} A {w:.1f} {w:.1f} 0 0 1 {p_open[0]:.1f} {p_open[1]:.1f}"/>'
                 )
+        else:
+            # Window glass line
+            svg_lines.append(
+                f'    <line class="window" x1="{p1[0]:.1f}" y1="{p1[1]:.1f}" x2="{p2[0]:.1f}" y2="{p2[1]:.1f}"/>'
+            )
 
     svg_lines.extend([
         f'  </g>',
@@ -214,7 +279,7 @@ def export_svg(model, filepath, level_id=None):
         f'',
         f'  <!-- Layer 6: Title Block -->',
         f'  <g id="layer-title-block">',
-        f'    <text class="title-block" x="{min_x + 30:.1f}" y="{min_y + 40:.1f}">{model.name}{level_title}</text>',
+        f'    <text class="title-block" x="{min_x + 30:.1f}" y="{min_y + 40:.1f}">{saxutils.escape(model.name)}{saxutils.escape(level_title)}</text>',
         f'    <text class="room-area" x="{min_x + 30:.1f}" y="{min_y + 70:.1f}" text-anchor="start">Total Area: {model.total_area_m2:.2f} m² | Walls: {model.total_wall_length_m:.1f} m</text>',
         f'  </g>',
         f'</svg>',
@@ -314,9 +379,19 @@ def export_json(model, filepath, level_id=None):
     d = model.to_dict()
     if level_id:
         d["walls"] = [w for w in d["walls"] if w.get("level_id") == level_id]
+        wall_ids = {w["id"] for w in d["walls"]}
         d["rooms"] = [r for r in d["rooms"] if r.get("level_id") == level_id]
+        d["openings"] = [
+            op for op in d["openings"]
+            if (op.get("wall_id") in wall_ids) or (not op.get("wall_id") and op.get("level_id") == level_id)
+        ]
         d["furniture"] = [f for f in d["furniture"] if f.get("level_id") == level_id]
         d["dimensions"] = [dim for dim in d["dimensions"] if dim.get("level_id") == level_id]
+        d["summary"] = {
+            "total_area_m2": round(sum(r.get("area_m2", 0.0) for r in d["rooms"]), 2),
+            "total_wall_length_m": round(sum(w.get("length_m", 0.0) for w in d["walls"]), 2),
+            "level_id": level_id,
+        }
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(d, f, indent=2)
     return filepath
@@ -338,13 +413,15 @@ def export_html(model, filepath, level_id=None):
             os.remove(tmp_svg_path)
 
     takeoff_data = model.takeoff()
+    safe_title = html.escape(model.name)
+    svg_clean = re.sub(r'<\?xml.*?\?>', '', svg_xml, flags=re.DOTALL).strip()
 
-    html = f"""<!DOCTYPE html>
+    html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{model.name} - Architectural Floor Plan Viewer</title>
+  <title>{safe_title} - Architectural Floor Plan Viewer</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1a1a24; color: #e0e0e0; display: flex; height: 100vh; overflow: hidden; }}
@@ -367,7 +444,7 @@ def export_html(model, filepath, level_id=None):
 </head>
 <body>
   <div id="sidebar">
-    <h1>{model.name}</h1>
+    <h1>{safe_title}</h1>
     <div class="meta">Sweet Home 3D Agent Harness Export</div>
 
     <div class="stat-grid takeoff-panel">
@@ -408,7 +485,7 @@ def export_html(model, filepath, level_id=None):
 
   <div id="viewport">
     <div id="svg-container">
-      {svg_xml}
+      {svg_clean}
     </div>
   </div>
 
@@ -432,6 +509,6 @@ def export_html(model, filepath, level_id=None):
 """
 
     with open(filepath, "w", encoding="utf-8") as f:
-        f.write(html)
+        f.write(html_content)
 
     return filepath

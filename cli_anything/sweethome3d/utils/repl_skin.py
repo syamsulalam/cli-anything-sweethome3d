@@ -14,7 +14,7 @@ class ReplSkin:
     CYAN = "\033[36m"
     GRAY = "\033[90m"
 
-    def __init__(self, app_name="sweethome3d", version="1.0.0"):
+    def __init__(self, app_name="sweethome3d", version="1.2.0"):
         self.app_name = app_name
         self.version = version
 
