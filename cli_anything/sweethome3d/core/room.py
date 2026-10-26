@@ -73,6 +73,45 @@ class Room:
         cy /= (6.0 * signed_area)
         return (round(cx, 2), round(cy, 2))
 
+    def get_clear_core_polygon(self, walls=None):
+        """Derives the inward-mitred clear core polygon bounded by actual incident walls (PAC-1 T07, R10-P1-01)."""
+        try:
+            from shapely.geometry import Polygon, LineString
+        except ImportError:
+            return None
+        
+        if len(self.points) < 3:
+            return None
+        
+        poly = Polygon(self.points)
+        if poly.is_empty or not poly.is_valid:
+            return poly
+
+        # Find incident walls on the exact same level
+        incident_thicknesses = []
+        if walls:
+            room_boundary = poly.boundary
+            for w in walls:
+                if getattr(w, "level_id", None) != self.level_id:
+                    continue
+                w_line = LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)])
+                if room_boundary.distance(w_line) <= max(w.thickness, 20.0):
+                    incident_thicknesses.append(w.thickness)
+
+        if incident_thicknesses:
+            t_wall = sum(incident_thicknesses) / len(incident_thicknesses)
+        else:
+            t_wall = 0.0
+
+        if t_wall <= 0.0:
+            return poly
+
+        # Mitred inward buffer (join_style=2 is mitre)
+        clear_poly = poly.buffer(-(t_wall / 2.0), join_style=2)
+        if clear_poly.is_empty:
+            return poly
+        return clear_poly
+
     def to_dict(self):
         return {
             "id": self.id,

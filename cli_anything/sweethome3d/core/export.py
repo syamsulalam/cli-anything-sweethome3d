@@ -339,7 +339,7 @@ def export_dxf(model, filepath, level_id=None):
     # Walls as Lines or Curved Polylines
     for w in walls:
         if abs(w.arc_extent) > 1e-4 and w.length > 0:
-            steps = max(16, int(abs(w.arc_extent) / 5.0))
+            steps = w.get_curve_sampling_steps()
             pts = [w.point_at_offset(i * w.length / steps) for i in range(steps + 1)]
             dxf.extend(["0", "POLYLINE", "8", "WALLS", "66", "1", "70", "0"])
             for p in pts:
@@ -352,7 +352,7 @@ def export_dxf(model, filepath, level_id=None):
                 "11", f"{w.x_end:.2f}", "21", f"{w.y_end:.2f}", "31", "0.0",
             ])
 
-    # Openings as Lines on DOORS Layer
+    # Openings as Lines on DOORS Layer (PAC-1 E02, E06, R10-P1-06)
     wall_ids = {w.id for w in walls}
     openings = [
         op for op in model.openings.values()
@@ -365,13 +365,24 @@ def export_dxf(model, filepath, level_id=None):
             continue
         p1 = geom["p1"]
         p2 = geom["p2"]
-        if op.opening_type == "door":
+        if op.opening_type == "door" and op.swing in ("left", "right"):
             hinge = geom["hinge"]
             p_open = geom["open_endpoint"]
             dxf.extend([
                 "0", "LINE", "8", "DOORS",
                 "10", f"{hinge[0]:.2f}", "20", f"{hinge[1]:.2f}", "30", "0.0",
                 "11", f"{p_open[0]:.2f}", "21", f"{p_open[1]:.2f}", "31", "0.0",
+            ])
+            dxf.extend([
+                "0", "LINE", "8", "DOORS",
+                "10", f"{p1[0]:.2f}", "20", f"{p1[1]:.2f}", "30", "0.0",
+                "11", f"{p2[0]:.2f}", "21", f"{p2[1]:.2f}", "31", "0.0",
+            ])
+        elif op.opening_type == "door" and op.swing == "sliding":
+            dxf.extend([
+                "0", "LINE", "8", "DOORS",
+                "10", f"{p1[0]:.2f}", "20", f"{p1[1]:.2f}", "30", "0.0",
+                "11", f"{p2[0]:.2f}", "21", f"{p2[1]:.2f}", "31", "0.0",
             ])
         else:
             dxf.extend([

@@ -40,25 +40,42 @@ class Opening:
             open_endpoint: (x, y) - open leaf tip position when swung 90 deg
         """
         w = self.width_cm
+        if w is None or not isinstance(w, (int, float)) or not math.isfinite(w) or w <= 0:
+            return None
+
         if self.x_cm is not None and self.y_cm is not None:
-            center_x = self.x_cm
-            center_y = self.y_cm
+            if not isinstance(self.x_cm, (int, float)) or not math.isfinite(self.x_cm):
+                return None
+            if not isinstance(self.y_cm, (int, float)) or not math.isfinite(self.y_cm):
+                return None
+            center_x = float(self.x_cm)
+            center_y = float(self.y_cm)
             if self.angle_deg is not None:
-                eff_angle = self.angle_deg
+                if not isinstance(self.angle_deg, (int, float)) or not math.isfinite(self.angle_deg):
+                    return None
+                eff_angle = float(self.angle_deg)
             elif wall is not None:
                 dx = wall.x_end - wall.x_start
                 dy = wall.y_end - wall.y_start
+                if not math.isfinite(dx) or not math.isfinite(dy):
+                    return None
                 eff_angle = math.degrees(math.atan2(dy, dx))
             else:
                 eff_angle = 0.0
+            if not math.isfinite(eff_angle):
+                return None
             rad = math.radians(eff_angle)
             ux, uy = math.cos(rad), math.sin(rad)
             nx, ny = -uy, ux
             p1 = (center_x - (w / 2.0) * ux, center_y - (w / 2.0) * uy)
             p2 = (center_x + (w / 2.0) * ux, center_y + (w / 2.0) * uy)
         elif wall is not None:
+            if self.offset_cm is None or not isinstance(self.offset_cm, (int, float)) or not math.isfinite(self.offset_cm):
+                return None
             p1 = wall.point_at_offset(self.offset_cm)
             p2 = wall.point_at_offset(self.offset_cm + w)
+            if not math.isfinite(p1[0]) or not math.isfinite(p1[1]) or not math.isfinite(p2[0]) or not math.isfinite(p2[1]):
+                return None
             dx = p2[0] - p1[0]
             dy = p2[1] - p1[1]
             L = math.hypot(dx, dy)

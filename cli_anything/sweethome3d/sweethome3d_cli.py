@@ -37,7 +37,7 @@ session_mgr = _LazySessionManagerProxy()
 skin = ReplSkin("sweethome3d", version="1.2.0")
 
 def assert_safe_export_target(output_path):
-    """Guards against overwriting active session, journal, lock, or recovery targets (PAC-1 S06/P0-03)."""
+    """Guards against overwriting active session, journal, lock, or recovery targets (PAC-1 S06/P0-03, R10-P0-02)."""
     target = os.path.normcase(os.path.abspath(output_path))
     mgr = get_session_mgr()
     sess_path = os.path.normcase(os.path.abspath(mgr.session_path))
@@ -63,6 +63,24 @@ def assert_safe_export_target(output_path):
         raise RuntimeError(
             f"Cannot export to protected recovery target '{output_path}': destination is guarded by active transaction journal."
         )
+
+    # Realpath / hard-link / symlink object identity check (R10-P0-02)
+    real_target = os.path.normcase(os.path.realpath(output_path))
+    if real_target in protected:
+        raise RuntimeError(
+            f"Cannot export to protected recovery target '{output_path}': resolved target '{real_target}' is guarded by active transaction journal."
+        )
+
+    if os.path.exists(output_path):
+        for p in protected:
+            if os.path.exists(p):
+                try:
+                    if os.path.samefile(output_path, p):
+                        raise RuntimeError(
+                            f"Cannot export to protected recovery target '{output_path}': destination is an alias/hardlink to guarded '{p}'."
+                        )
+                except (OSError, ValueError):
+                    pass
 
 def output_result(ctx, data, human_formatter=None):
     """Outputs data either as JSON or human-readable format based on context flag."""
@@ -167,20 +185,40 @@ def project_info(ctx):
 @click.option("--strict", is_flag=True, help="Exit with non-zero status if validation fails.")
 @click.pass_context
 def project_validate(ctx, strict):
-    """Run architectural constraint and closure validation checks."""
+    """Run architectural constraint and closure validation checks (PAC-1 A07, R10-P1-04)."""
     val = session_mgr.model.validate()
+    is_json = ctx.obj.get("json", False) if ctx.obj else False
+    has_strict_failure = strict and (
+        not val["valid"]
+        or len(val.get("warnings", [])) > 0
+        or any(f.get("coverage") == "not_checked" for f in val.get("findings", []))
+    )
+
+    if has_strict_failure:
+        if is_json:
+            click.echo(json.dumps({
+                "status": "error",
+                "error": "Strict validation failed: model violates constraints or has unchecked coverage.",
+                "data": val
+            }, indent=2))
+        else:
+            skin.error("Project validation FAILED (strict mode).")
+            for err in val.get("errors", []):
+                skin.error(f"Error: {err}")
+            for warn in val.get("warnings", []):
+                skin.warning(f"Warning: {warn}")
+        ctx.exit(1)
+
     def formatter(d):
         if d["valid"]:
             skin.success("Project architectural validation PASSED.")
         else:
             skin.error("Project validation FAILED.")
-        for err in d["errors"]:
+        for err in d.get("errors", []):
             skin.error(f"Error: {err}")
-        for warn in d["warnings"]:
+        for warn in d.get("warnings", []):
             skin.warning(f"Warning: {warn}")
     output_result(ctx, val, human_formatter=formatter)
-    if strict and (not val["valid"] or len(val["warnings"]) > 0):
-        ctx.exit(1)
 
 @project.command(name="template")
 @click.option("--type", "template_type", type=click.Choice(["type36", "type45", "studio", "pavilion"], case_sensitive=False),

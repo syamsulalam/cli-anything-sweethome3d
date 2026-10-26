@@ -313,86 +313,96 @@ class HomeModel:
         )
         skirting_net_m = round(max(0.0, total_skirting_m - doors_deduction_m), 2)
 
-        # Clear core area & clear face skirting (determining wall thickness dynamically from incident walls)
+        # Clear core area & clear face skirting (mitred inward clear core polygon - PAC-1 T07, R10-P1-01)
         clear_core_area_m2 = 0.0
         clear_face_skirting_gross_m = 0.0
 
         for r in self.rooms.values():
-            pts = r.points
-            is_rect = False
-            t_m = 0.0
-            if len(pts) == 4:
-                l1 = math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])
-                l2 = math.hypot(pts[2][0] - pts[1][0], pts[2][1] - pts[1][1])
-                l3 = math.hypot(pts[3][0] - pts[2][0], pts[3][1] - pts[2][1])
-                l4 = math.hypot(pts[0][0] - pts[3][0], pts[0][1] - pts[3][1])
-                # Check if opposite edges are equal within 1cm
-                if abs(l1 - l3) < 1.0 and abs(l2 - l4) < 1.0:
-                    is_rect = True
-                    incident_thicknesses = []
-                    for i in range(4):
-                        p_a = pts[i]
-                        p_b = pts[(i + 1) % 4]
-                        for w in self.walls.values():
-                            if w.level_id != r.level_id:
-                                continue
-                            d_fwd = math.hypot(w.x_start - p_a[0], w.y_start - p_a[1]) + math.hypot(w.x_end - p_b[0], w.y_end - p_b[1])
-                            d_rev = math.hypot(w.x_start - p_b[0], w.y_start - p_b[1]) + math.hypot(w.x_end - p_a[0], w.y_end - p_a[1])
-                            if d_fwd < 10.0 or d_rev < 10.0:
-                                incident_thicknesses.append(w.thickness)
-                                break
-                    if incident_thicknesses:
-                        t_cm = sum(incident_thicknesses) / len(incident_thicknesses)
-                        t_m = t_cm / 100.0
-                    elif self.walls:
-                        t_m = (sum(w.thickness for w in self.walls.values()) / len(self.walls)) / 100.0
-                    else:
-                        t_m = 0.0
-
-            if is_rect and t_m > 0.0:
-                l1_m = l1 / 100.0
-                l2_m = l2 / 100.0
-                c1 = max(0.0, l1_m - t_m)
-                c2 = max(0.0, l2_m - t_m)
-                clear_core_area_m2 += c1 * c2
-                clear_face_skirting_gross_m += 2.0 * (c1 + c2)
+            clear_poly = r.get_clear_core_polygon(self.walls.values())
+            if clear_poly is not None and not clear_poly.is_empty:
+                clear_core_area_m2 += clear_poly.area / 10000.0
+                clear_face_skirting_gross_m += clear_poly.length / 100.0
             else:
                 clear_core_area_m2 += r.area_m2
                 clear_face_skirting_gross_m += r.perimeter_cm / 100.0
 
         clear_face_skirting_net_m = round(max(0.0, clear_face_skirting_gross_m - doors_deduction_m), 2)
 
-        # Net physical masonry volume
+        # Net physical masonry volume via CSG vertical slab integration in world Z (PAC-1 T08, T09, R10-P1-02)
         try:
             from shapely.geometry import Polygon, LineString
             from shapely.ops import unary_union
-            wall_polys = []
+
+            levels_dict = {lvl.id: lvl.elevation_cm for lvl in self.levels}
+            z_breaks = set()
+            wall_data = []
             for w in self.walls.values():
+                lvl_elev = levels_dict.get(w.level_id, 0.0)
+                w_z0 = lvl_elev
+                w_z1 = lvl_elev + w.height
+                z_breaks.add(w_z0)
+                z_breaks.add(w_z1)
                 t = w.thickness / 2.0
                 if abs(w.arc_extent) > 1e-4 and w.length > 0:
-                    steps = max(16, int(abs(w.arc_extent) / 5.0))
+                    steps = w.get_curve_sampling_steps()
                     pts = [w.point_at_offset(i * w.length / steps) for i in range(steps + 1)]
-                    wall_polys.append(LineString(pts).buffer(t, cap_style="square"))
+                    poly = LineString(pts).buffer(t, cap_style="square")
                 else:
                     if w.chord_length < 1e-4:
                         continue
-                    wall_polys.append(LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)]).buffer(t, cap_style="square"))
-            if wall_polys:
-                union_footprint_m2 = unary_union(wall_polys).area / 10000.0
-                avg_wall_h_m = (sum(w.height for w in self.walls.values()) / len(self.walls)) / 100.0
-                gross_volume_m3 = union_footprint_m2 * avg_wall_h_m
-            else:
-                gross_volume_m3 = 0.0
+                    poly = LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)]).buffer(t, cap_style="square")
+                wall_data.append((w, w_z0, w_z1, poly))
+
+            opening_data = []
+            for op in self.openings.values():
+                w = self.walls.get(op.wall_id)
+                if not w:
+                    continue
+                lvl_elev = levels_dict.get(op.level_id or w.level_id, 0.0)
+                op_z0 = lvl_elev + op.elevation_cm
+                op_z1 = op_z0 + op.height_cm
+                z_breaks.add(op_z0)
+                z_breaks.add(op_z1)
+                geom = op.get_effective_geometry(w)
+                if geom:
+                    p1 = geom["p1"]
+                    p2 = geom["p2"]
+                    t_cut = max(w.thickness * 1.5, 30.0)
+                    op_poly = LineString([p1, p2]).buffer(t_cut / 2.0, cap_style="flat")
+                    opening_data.append((op, op_z0, op_z1, op_poly))
+
+            sorted_z = sorted(z_breaks)
+            total_net_vol = 0.0
+            total_gross_vol = 0.0
+
+            for i in range(len(sorted_z) - 1):
+                z_a = sorted_z[i]
+                z_b = sorted_z[i + 1]
+                dh = z_b - z_a
+                if dh < 1e-4:
+                    continue
+                mid_z = (z_a + z_b) / 2.0
+                active_walls = [p for (w, z0, z1, p) in wall_data if z0 <= mid_z <= z1]
+                if not active_walls:
+                    continue
+                u_wall = unary_union(active_walls)
+                gross_area = u_wall.area / 10000.0
+                total_gross_vol += gross_area * (dh / 100.0)
+
+                active_openings = [p for (op, z0, z1, p) in opening_data if z0 <= mid_z <= z1]
+                if active_openings:
+                    u_cut = unary_union(active_openings)
+                    net_geom = u_wall.difference(u_cut)
+                    net_area = net_geom.area / 10000.0
+                else:
+                    net_area = gross_area
+                total_net_vol += net_area * (dh / 100.0)
+
+            gross_volume_m3 = round(total_gross_vol, 3)
+            net_masonry_volume_m3 = round(total_net_vol, 3)
         except Exception:
             gross_volume_m3 = sum((w.length / 100.0) * (w.thickness / 100.0) * (w.height / 100.0) for w in self.walls.values())
-
-        void_volume_m3 = 0.0
-        for op in self.openings.values():
-            w_h = self.walls.get(op.wall_id)
-            t_m = (w_h.thickness / 100.0) if w_h else 0.15
-            void_volume_m3 += (op.width_cm / 100.0) * (op.height_cm / 100.0) * t_m
-
-        net_masonry_volume_m3 = round(max(0.0, gross_volume_m3 - void_volume_m3), 3)
+            net_masonry_volume_m3 = gross_volume_m3
 
         summary = {
             "wall_perimeter_m": self.total_wall_length_m,
@@ -779,6 +789,8 @@ class HomeModel:
             return False
 
         for op in self.openings.values():
+            if not _is_finite_opening(op):
+                continue
             if op.opening_type == "door" and op.swing not in ("none", "sliding"):
                 wall = self.walls.get(op.wall_id)
                 geom = op.get_effective_geometry(wall)
@@ -843,9 +855,9 @@ class HomeModel:
 
                     # Construct 2D wall polygon
                     if abs(w.arc_extent) > 1e-4 and w.length > 0:
-                        steps = max(16, int(abs(w.arc_extent) / 5.0))
+                        steps = w.get_curve_sampling_steps()
                         pts = [w.point_at_offset(i * w.length / steps) for i in range(steps + 1)]
-                        wall_poly = LineString(pts).buffer(w.thickness / 2.0, cap_style="flat")
+                        wall_poly = LineString(pts).buffer(w.thickness / 2.0, cap_style="square")
                     else:
                         L = w.length
                         if L < 1e-4:
@@ -945,7 +957,8 @@ class HomeModel:
                                 "message": msg
                             })
                         if _is_finite_room(r):
-                            room_poly = Polygon(r.points)
+                            clear_poly = r.get_clear_core_polygon(self.walls.values())
+                            room_poly = clear_poly if (clear_poly is not None and not clear_poly.is_empty) else Polygon(r.points)
                             furn_poly = Polygon(_get_furn_corners(f))
                             if not room_poly.buffer(0.01).covers(furn_poly):
                                 outside = furn_poly.difference(room_poly.buffer(0.01))
@@ -960,10 +973,12 @@ class HomeModel:
                                         "witness": {"outside_area_cm2": round(outside.area, 2)}
                                     })
         else:
+            msg = "Mandatory geometry engine (Shapely) is unavailable; spatial validation could not be executed."
+            errors.append(msg)
             findings.append({
                 "code": "GEOMETRY_ENGINE_UNAVAILABLE",
-                "severity": "warning",
-                "message": "Shapely geometry engine is unavailable. Spatial conflict and clearance checks were skipped.",
+                "severity": "error",
+                "message": msg,
                 "coverage": "not_checked"
             })
 

@@ -1497,6 +1497,174 @@ def test_export_level_scoping_svg_html_dxf():
             assert "FURNITURE" in dxf_content
             assert "POLYLINE" in dxf_content
 
+def test_incomplete_journal_schema_rejects_and_preserves_target():
+    """PAC-1 S01, R10-P0-01: Incomplete journal missing had_target or hashes rejects and preserves target."""
+    with tempfile.TemporaryDirectory() as td:
+        sess_file = os.path.join(td, "session.json")
+        target_file = os.path.join(td, "home.json")
+        m = SessionManager(sess_file)
+        m.new_project("Base Plan")
+        m.save_file(target_file)
+        orig_target_content = open(target_file, "r").read()
+
+        # Write incomplete journal missing had_target and sha256 hashes
+        incomplete_rec = {
+            "schema_version": 1,
+            "tx_id": "tx_bad_001",
+            "target": target_file,
+            "expected_revision": 0,
+            "target_revision": 1,
+            "staged_session": os.path.join(td, "nonexistent.staged")
+        }
+        with open(sess_file + ".pending", "w", encoding="utf-8") as pf:
+            json.dump(incomplete_rec, pf)
+
+        # Recreating SessionManager triggers _locked_acquire_and_reconcile
+        m2 = SessionManager(sess_file)
+        # Target must be completely preserved!
+        assert os.path.exists(target_file)
+        assert open(target_file, "r").read() == orig_target_content
+        # Journal must be preserved as evidence, not deleted
+        assert os.path.exists(sess_file + ".pending")
+
+def test_reconcile_tampered_current_session_fails_closed():
+    """PAC-1 S01, R10-P0-01: Reconcile with altered current session fails closed and preserves journal."""
+    with tempfile.TemporaryDirectory() as td:
+        sess_file = os.path.join(td, "session.json")
+        target_file = os.path.join(td, "home.json")
+        m = SessionManager(sess_file)
+        m.new_project("Base")
+        m.save_file(target_file)
+        
+        # Simulate Scenario 1 crash: current revision reached target_rev (1), but content altered
+        sess_sha = _calc_sha256(sess_file)
+        art_sha = _calc_sha256(target_file)
+        
+        # Tamper current session without changing revision
+        with open(sess_file, "r", encoding="utf-8") as f:
+            sess_data = json.load(f)
+        sess_data["model"]["name"] = "Tampered Model"
+        with open(sess_file, "w", encoding="utf-8") as f:
+            json.dump(sess_data, f)
+            
+        pending_rec = {
+            "schema_version": 1,
+            "tx_id": "tx_tamper_001",
+            "target": target_file,
+            "staged_session": os.path.join(td, "session.json.staged"),
+            "candidate_session_sha256": sess_sha,
+            "candidate_artifact_sha256": art_sha,
+            "had_target": True,
+            "base_artifact_sha256": art_sha,
+            "backup": os.path.join(td, "backup.bak"),
+            "expected_revision": 0,
+            "target_revision": 1
+        }
+        with open(sess_file + ".pending", "w", encoding="utf-8") as pf:
+            json.dump(pending_rec, pf)
+
+        m2 = SessionManager(sess_file)
+        # Pending journal must be preserved because session hash failed verification
+        assert os.path.exists(sess_file + ".pending")
+
+def test_export_rejects_hardlink_alias_to_protected_target():
+    """PAC-1 S06, R10-P0-02: Export guards detect hard link / alias pointing to protected target."""
+    from cli_anything.sweethome3d.sweethome3d_cli import assert_safe_export_target, session_mgr
+    with tempfile.TemporaryDirectory() as td:
+        target = os.path.join(td, "protected.json")
+        with open(target, "w") as f:
+            f.write("{}")
+        session_mgr.active_file = target
+
+        alias = os.path.join(td, "alias.json")
+        try:
+            os.link(target, alias)
+            has_link = True
+        except (OSError, NotImplementedError):
+            has_link = False
+
+        if has_link:
+            import pytest
+            with pytest.raises(RuntimeError, match="guarded|alias|hardlink|protected"):
+                assert_safe_export_target(alias)
+
+def test_opening_non_finite_angle_returns_structured_invalidity():
+    """PAC-1 C01, R10-P1-04: Non-finite opening angle does not crash and returns structured findings."""
+    m = HomeModel("Inf Opening")
+    m.add_wall("w", 0, 0, 400, 0)
+    m.add_opening("d", "door", wall_id="w", x_cm=200, y_cm=0, angle_deg=float("inf"))
+    res = m.validate()
+    assert res["valid"] is False
+    assert any(f["code"] == "NON_FINITE_COORDINATE" for f in res["findings"])
+
+def test_large_scale_curved_wall_scale_bounded_collision():
+    """PAC-1 C03, R10-P1-03: Error-bounded sampling catches objects on large-radius walls."""
+    c = HomeModel("Large Arc Wall")
+    w = c.add_wall("arc", 0, 0, 40000, 0, thickness=20, arc_extent=90)
+    x, y = w.point_at_offset(w.length * 8.5 / 18)
+    c.add_furniture("f", "probe", x_cm=x, y_cm=y, width_cm=10, depth_cm=10, height_cm=75)
+    res = c.validate()
+    assert any(f["code"] == "FURNITURE_WALL_COLLISION" for f in res["findings"])
+
+def test_parallelogram_clear_core_area():
+    """PAC-1 T07, R10-P1-01: Inward-mitred buffer derives exact clear core on parallelograms."""
+    m = HomeModel("Parallelogram Room")
+    # Vertices (0,0), (300,0), (480,240), (180,240)
+    pts = [(0, 0), (300, 0), (480, 240), (180, 240)]
+    m.add_room("r_para", "Parallelogram", pts, with_walls=True, wall_thickness=15.0)
+    t = m.takeoff()
+    assert t["summary"]["floor_area_m2"] == 7.20
+    assert abs(t["summary"]["clear_core_area_m2"] - 6.328) < 0.005
+
+def test_unwalled_room_with_unrelated_multilevel_wall():
+    """PAC-1 T07, R10-P1-01: Unwalled room does not inherit thickness from unrelated levels."""
+    m = HomeModel("Unwalled Multi-Level")
+    m.add_level("level2", "Second Floor", elevation_cm=300.0)
+    m.add_wall("w_lvl2", 0, 0, 500, 0, thickness=30.0, level_id="level2")
+    m.add_room("r_unwalled", "Unwalled", [(0, 0), (300, 0), (300, 300), (0, 300)], level_id="level1")
+    t = m.takeoff()
+    # Unwalled room must retain exact 9.000 m² clear core
+    assert t["summary"]["clear_core_area_m2"] == 9.000
+
+def test_csg_vertical_slab_masonry_volume_multilevel_and_mixed_height():
+    """PAC-1 T08, T09, R10-P1-02: CSG vertical slab integration in world Z handles stacked and mixed walls."""
+    # Stacked identical walls on Z=0 and Z=3m
+    m1 = HomeModel("Stacked")
+    m1.add_level("l2", "Level 2", elevation_cm=300.0)
+    m1.add_wall("w1", 0, 0, 300, 0, thickness=20, height=280, level_id="level1")
+    m1.add_wall("w2", 0, 0, 300, 0, thickness=20, height=280, level_id="l2")
+    t1 = m1.takeoff()
+    assert t1["summary"]["net_masonry_volume_m3"] == 3.584
+
+    # Disjoint 1m (4m high) + 3m (2m high) 20cm walls
+    m2 = HomeModel("Mixed Height")
+    m2.add_wall("w1", 0, 0, 100, 0, thickness=20, height=400)
+    m2.add_wall("w2", 200, 0, 500, 0, thickness=20, height=200)
+    t2 = m2.takeoff()
+    assert t2["summary"]["net_masonry_volume_m3"] == 2.240
+
+def test_dxf_opening_semantics_none_and_sliding():
+    """PAC-1 E02, E06, R10-P1-06: DXF distinguishes hinged, sliding, and cased openings."""
+    from cli_anything.sweethome3d.core import export_dxf
+    m = HomeModel("Openings DXF")
+    m.add_wall("w", 0, 0, 500, 0, thickness=20)
+    m.add_opening("d_hinged", "Hinged Door", wall_id="w", offset_cm=50, width_cm=90, swing="right")
+    m.add_opening("d_sliding", "Sliding Door", wall_id="w", offset_cm=200, width_cm=90, swing="sliding")
+    m.add_opening("d_cased", "Cased Opening", wall_id="w", offset_cm=350, width_cm=90, swing="none")
+
+    with tempfile.TemporaryDirectory() as td:
+        dxf_path = os.path.join(td, "test_doors.dxf")
+        export_dxf(m, dxf_path)
+        with open(dxf_path, "r", encoding="utf-8") as f:
+            content = f.read()
+            # Hinged door has leaf line (50,0)->(50,90)
+            assert "50.00\n21\n90.00" in content or "50.00\r\n21\r\n90.00" in content
+            # Sliding door at (200,0) does NOT have (200,90) hinged leaf line!
+            assert "200.00\n21\n90.00" not in content and "200.00\r\n21\r\n90.00" not in content
+            # Cased opening at (350,0) does NOT have (350,90) hinged leaf line!
+            assert "350.00\n21\n90.00" not in content and "350.00\r\n21\r\n90.00" not in content
+
+
 
 
 

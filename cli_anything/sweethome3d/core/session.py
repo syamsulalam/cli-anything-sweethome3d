@@ -29,23 +29,27 @@ def _calc_sha256(path):
     return h.hexdigest()
 
 def _validate_journal_schema(rec):
-    """Validates that a journal dictionary conforms strictly to the recovery schema (PAC-1 S01)."""
+    """Validates that a journal dictionary conforms strictly to the recovery schema (PAC-1 S01, R10-P0-01)."""
     if not isinstance(rec, dict):
         return False
-    if rec.get("schema_version") != 1:
+    if type(rec.get("schema_version")) is not int or isinstance(rec.get("schema_version"), bool) or rec.get("schema_version") != 1:
         return False
-    req_keys = ["tx_id", "target", "staged_session", "target_revision", "expected_revision"]
-    for k in req_keys:
-        if k not in rec or rec[k] is None:
+    
+    # Required non-empty string fields
+    req_str_keys = ["tx_id", "target", "staged_session", "candidate_session_sha256", "candidate_artifact_sha256"]
+    for k in req_str_keys:
+        val = rec.get(k)
+        if not isinstance(val, str) or not val.strip():
             return False
-    if not isinstance(rec["tx_id"], str) or not rec["tx_id"].strip():
-        return False
-    if not isinstance(rec["target"], str) or not rec["target"].strip():
-        return False
-    if not isinstance(rec["staged_session"], str) or not rec["staged_session"].strip():
-        return False
+    
+    # Validate 64-char hex hashes
+    for h_key in ("candidate_session_sha256", "candidate_artifact_sha256"):
+        h_val = rec.get(h_key)
+        if len(h_val) != 64 or not all(c in "0123456789abcdefABCDEF" for c in h_val):
+            return False
+
     # STRICT TYPE CHECK: in Python, isinstance(True, int) is True!
-    if type(rec["target_revision"]) is not int or type(rec["expected_revision"]) is not int:
+    if type(rec.get("target_revision")) is not int or type(rec.get("expected_revision")) is not int:
         return False
     if isinstance(rec["target_revision"], bool) or isinstance(rec["expected_revision"], bool):
         return False
@@ -53,6 +57,20 @@ def _validate_journal_schema(rec):
         return False
     if rec["target_revision"] <= rec["expected_revision"]:
         return False
+
+    # had_target MUST be an explicit boolean
+    if not isinstance(rec.get("had_target"), bool):
+        return False
+
+    # If had_target is True, base_artifact_sha256 and backup are strictly required
+    if rec["had_target"]:
+        backup = rec.get("backup")
+        if not isinstance(backup, str) or not backup.strip():
+            return False
+        base_sha = rec.get("base_artifact_sha256")
+        if not isinstance(base_sha, str) or len(base_sha) != 64 or not all(c in "0123456789abcdefABCDEF" for c in base_sha):
+            return False
+
     return True
 
 def _rollback_to_base(rec):
@@ -172,19 +190,26 @@ def _reconcile_pending(filepath):
         except Exception:
             curr_rev = 0
 
-    # Stale journal guard (P0-01):
+    # Stale journal guard & unexpected predecessor guard (PAC-1 S04, R10-P0-01):
     # If the current disk session is already newer than target_rev, never overwrite or rewind it!
     if curr_rev > target_rev:
+        return
+    # If current revision does not match expected_revision and has not reached target_revision,
+    # it is an unauthorized predecessor or corrupted chain: fail closed!
+    if curr_rev != expected_rev and curr_rev != target_rev:
         return
 
     reconciled = False
 
     # Scenario 1: Session on disk already reached target_revision (Phase 2 completed)
     if curr_rev == target_rev:
+        # P0-01: Verify current session file matches candidate_session_sha256
+        if not os.path.exists(filepath) or _calc_sha256(filepath) != cand_sess_sha:
+            return  # Current session file altered or missing; preserve journal evidence and fail closed
+
         # P0-01: Verify artifact at target matches candidate_artifact_sha256
-        if cand_art_sha:
-            if not target or not os.path.exists(target) or _calc_sha256(target) != cand_art_sha:
-                return  # Target corrupted or missing; preserve journal evidence and fail closed
+        if not target or not os.path.exists(target) or _calc_sha256(target) != cand_art_sha:
+            return  # Target corrupted or missing; preserve journal evidence and fail closed
 
         if backup and os.path.exists(backup):
             try:
@@ -203,33 +228,23 @@ def _reconcile_pending(filepath):
                 pass
         reconciled = True
 
-    # Scenario 2: Candidate session is staged on disk
+    # Scenario 2: Candidate session is staged on disk and current revision is expected_revision
     elif staged_session and os.path.exists(staged_session):
         # P0-01: Verify staged session matches candidate_session_sha256
         staged_sess_sha = _calc_sha256(staged_session)
-        if cand_sess_sha and staged_sess_sha != cand_sess_sha:
+        if staged_sess_sha != cand_sess_sha:
             # Staged session corrupted/altered! Cannot roll forward, roll back to base
             reconciled = _rollback_to_base(rec)
         else:
-            target_sha = None
-            tmp_target_sha = None
-            if target and os.path.exists(target):
-                try:
-                    target_sha = _calc_sha256(target)
-                except Exception:
-                    target_sha = None
-            if tmp_target and os.path.exists(tmp_target):
-                try:
-                    tmp_target_sha = _calc_sha256(tmp_target)
-                except Exception:
-                    tmp_target_sha = None
+            target_sha = _calc_sha256(target) if (target and os.path.exists(target)) else None
+            tmp_target_sha = _calc_sha256(tmp_target) if (tmp_target and os.path.exists(tmp_target)) else None
 
             artifact_ready = False
-            if cand_art_sha and target_sha == cand_art_sha:
+            if target_sha == cand_art_sha:
                 # Target was already published before crash
                 artifact_ready = True
-            elif tmp_target and os.path.exists(tmp_target) and (cand_art_sha is None or tmp_target_sha == cand_art_sha):
-                # Target was NOT replaced yet, but staged candidate artifact exists: complete artifact replacement!
+            elif tmp_target and os.path.exists(tmp_target) and tmp_target_sha == cand_art_sha:
+                # Target was NOT replaced yet, but staged candidate artifact matches candidate hash: complete artifact replacement!
                 try:
                     os.replace(tmp_target, target)
                     artifact_ready = True
