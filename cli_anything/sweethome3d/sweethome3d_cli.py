@@ -16,6 +16,10 @@ from cli_anything.sweethome3d.core import (
 )
 from cli_anything.sweethome3d.utils.repl_skin import ReplSkin
 from cli_anything.sweethome3d.utils.sweethome3d_backend import find_sweethome3d, launch_gui, get_install_instructions
+from cli_anything.sweethome3d import __version__
+from cli_anything.sweethome3d.core import session as session_module
+
+SESSION_FILE = getattr(session_module, "SESSION_FILE", os.path.expanduser("~/.cli_anything_sweethome3d_session.json"))
 
 _session_mgr = None
 
@@ -156,20 +160,27 @@ def safe_publish_export(output_path, generator_fn):
                 pass
 
 
-def output_result(ctx, data, human_formatter=None):
-    """Outputs data either as JSON or human-readable format based on context flag (PAC-1 A04, R16-P1-04, R17-P1-04)."""
+def output_result(ctx, data, human_formatter=None, include_project=True):
+    """Outputs data either as JSON or human-readable format based on context flag (PAC-1 A04, R16-P1-04, R17-P1-04, R21-P1-02)."""
     is_json = ctx.obj.get("json", False) if ctx.obj else False
     if is_json:
-        # PAC-1 A04, R16-P1-04, R17-P1-04: Versioned finite JSON envelope
+        # PAC-1 A04, R16-P1-04, R17-P1-04, R21-P1-02: Versioned finite JSON envelope
+        project_meta = None
+        if include_project:
+            try:
+                mgr = get_session_mgr()
+                project_meta = {
+                    "name": mgr.model.name if mgr.model else None,
+                    "active_file": mgr.active_file,
+                    "revision": getattr(mgr, "revision", 0),
+                }
+            except Exception:
+                project_meta = None
         payload = {
             "protocol_version": "1",
             "status": "success",
             "outcome": "ok",
-            "project": {
-                "name": session_mgr.model.name if session_mgr.model else None,
-                "active_file": session_mgr.active_file,
-                "revision": getattr(session_mgr, "revision", 0),
-            },
+            "project": project_meta,
             "data": data,
             "error": None
         }
@@ -1019,14 +1030,21 @@ def gui_cmd(ctx, project_file):
 @cli.command(name="capability")
 @click.pass_context
 def capability_cmd(ctx):
-    """Outputs agent-native capability manifest and supported CAD features (Gate A01, A04, A07)."""
+    """Outputs agent-native capability manifest and supported CAD features (Gate A01, A04, A07, R21-P1-02)."""
+    shapely_ok = False
+    try:
+        import shapely
+        shapely_ok = True
+    except (ImportError, Exception):
+        shapely_ok = False
+
     manifest = {
         "harness": "cli-anything-sweethome3d",
-        "version": "2.12.0",
+        "version": __version__,
         "spec_version": "PAC-1",
         "geometry_engine": {
             "name": "shapely",
-            "available": True,
+            "available": shapely_ok,
         },
         "supported_entities": [
             "wall", "room", "opening", "furniture", "dimension", "level"
@@ -1045,44 +1063,68 @@ def capability_cmd(ctx):
             "headless_roundtrip": True
         }
     }
-    output_result(ctx, manifest)
+    output_result(ctx, manifest, include_project=False)
 
 @cli.command(name="doctor")
 @click.pass_context
 def doctor_cmd(ctx):
-    """Runs comprehensive environment, session journal, and geometry diagnostics (Gate A08)."""
+    """Runs comprehensive environment, session journal, and geometry diagnostics (Gate A08, R21-P1-03)."""
     shapely_ok = False
     try:
         import shapely
         shapely_ok = True
-    except ImportError:
-        pass
+    except (ImportError, Exception):
+        shapely_ok = False
 
-    session_path = session_mgr.active_file or session_mgr.session_path
+    mgr = None
+    session_path = None
+    session_load_err = None
+
+    try:
+        if _session_mgr is not None:
+            mgr = _session_mgr
+            session_path = getattr(mgr, "session_path", None)
+        else:
+            mgr = get_session_mgr()
+            session_path = getattr(mgr, "session_path", None)
+    except Exception as exc:
+        session_load_err = str(exc)
+
+    if not session_path:
+        session_path = getattr(sys.modules.get(__name__), "SESSION_FILE", None) or getattr(session_module, "SESSION_FILE", None) or os.path.expanduser("~/.cli_anything_sweethome3d_session.json")
+
     journal_path = (session_path + ".pending") if session_path else None
     session_exists = os.path.exists(session_path) if session_path else False
     has_pending_journal = os.path.exists(journal_path) if journal_path else False
 
     model_valid = True
     model_findings = []
-    if session_mgr.model:
+
+    if session_load_err:
+        model_valid = False
+        model_findings.append({"code": "SESSION_CORRUPT", "severity": "error", "message": session_load_err})
+    elif session_exists:
         try:
-            val = session_mgr.model.validate()
+            with open(session_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "model" in data:
+                    model = HomeModel.from_dict(data["model"])
+                    val = model.validate()
+                    model_valid = val.get("valid", True)
+                    model_findings = val.get("findings", [])
+        except Exception as e:
+            model_valid = False
+            model_findings.append({"code": "SESSION_CORRUPT", "severity": "error", "message": str(e)})
+    elif mgr and getattr(mgr, "model", None):
+        try:
+            val = mgr.model.validate()
             model_valid = val.get("valid", True)
             model_findings = val.get("findings", [])
         except Exception as e:
             model_valid = False
             model_findings.append({"code": "MODEL_VALIDATE_ERROR", "severity": "error", "message": str(e)})
-    elif session_exists:
-        try:
-            session_mgr.load_session()
-            if session_mgr.model:
-                val = session_mgr.model.validate()
-                model_valid = val.get("valid", True)
-                model_findings = val.get("findings", [])
-        except Exception as e:
-            model_valid = False
-            model_findings.append({"code": "SESSION_LOAD_ERROR", "severity": "error", "message": str(e)})
+
+    active_artifact = getattr(mgr, "active_file", None) if mgr else None
 
     health_data = {
         "healthy": shapely_ok and not has_pending_journal and model_valid,
@@ -1092,10 +1134,13 @@ def doctor_cmd(ctx):
             "pending_journal": has_pending_journal,
             "model_valid": model_valid,
         },
+        "session_path": session_path,
         "active_session": session_path,
+        "active_artifact": active_artifact,
+        "journal_path": journal_path,
         "findings": model_findings
     }
-    output_result(ctx, health_data)
+    output_result(ctx, health_data, include_project=False)
 
 # ==============================================================================
 # 11. Interactive REPL Mode

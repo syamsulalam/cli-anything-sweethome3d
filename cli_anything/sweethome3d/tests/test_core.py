@@ -1,5 +1,6 @@
 import os
 import math
+import builtins
 import tempfile
 import zipfile
 import json
@@ -13,6 +14,8 @@ from click.testing import CliRunner
 from shapely.geometry import Polygon, Point, GeometryCollection
 from shapely.ops import unary_union
 from cli_anything.sweethome3d import sweethome3d_cli as cli_module
+from cli_anything.sweethome3d import __version__
+from cli_anything.sweethome3d.core import session as session_module
 
 from cli_anything.sweethome3d.core.wall import Wall
 from cli_anything.sweethome3d.core.room import Room
@@ -3003,6 +3006,120 @@ def test_cli_doctor_diagnostics():
     assert data["status"] == "success"
     assert "healthy" in data["data"]
     assert data["data"]["checks"]["geometry_engine_available"] is True
+
+
+# ==============================================================================
+# Round 21 Acceptance Oracles
+# ==============================================================================
+
+@pytest.mark.parametrize('case', ['metadata_multileaf', 'scaled_preset_tolerance'])
+def test_every_native_sash_branch_preserves_or_refuses(case):
+    root = ET.Element('home', version='7400')
+    ET.SubElement(root, 'level', id='level1', name='Ground', elevation='0',
+                  floorThickness='12', height='280')
+    door = ET.SubElement(root, 'doorOrWindow', id='door', name='Native door',
+                         level='level1', x='100', y='0', angle='0',
+                         width='200', depth='20', height='210')
+    keys = ('xAxis', 'yAxis', 'width', 'startAngle', 'endAngle')
+    if case == 'metadata_multileaf':
+        sashes = [(0, .5, .5, 0, -math.pi / 2),
+                  (1, .5, .5, math.pi, 3 * math.pi / 2)]
+    else:
+        sashes = [(0.00009, .5, 1, 0, -math.pi / 2)]
+    for sash in sashes:
+        ET.SubElement(door, 'sash', **dict(zip(keys, map(str, sash))))
+    if case == 'metadata_multileaf':
+        ET.SubElement(door, 'property', name='cli-anything.opening.v1',
+                      value=json.dumps({'version': 1, 'kind': 'door',
+                                        'operation': 'right', 'host_id': None,
+                                        'offset_cm': 0}))
+    try:
+        m = HomeModel.from_xml(ET.tostring(root, encoding='unicode'))
+        m = HomeModel.from_dict(json.loads(json.dumps(m.to_dict())))
+        result = ET.fromstring(m.to_xml()).findall('doorOrWindow/sash')
+    except ValueError as exc:
+        assert any(w in str(exc).lower() for w in ('sash', 'operation', 'unsupported'))
+        return
+    assert len(result) == len(sashes)
+    for actual, expected in zip(result, sashes):
+        values = tuple(float(actual.get(k)) for k in keys)
+        assert abs(values[0] - expected[0]) * 200 <= 0.01
+        assert abs(values[1] - expected[1]) * 20 <= 0.01
+        assert abs(values[2] - expected[2]) * 200 <= 0.01
+        for i in (3, 4):
+            delta = (values[i] - expected[i] + math.pi) % (2 * math.pi) - math.pi
+            assert 2 * 200 * expected[2] * abs(math.sin(delta / 2)) <= 0.01
+
+
+def test_capability_does_not_load_project_session(monkeypatch):
+    def forbidden_session_load():
+        raise RuntimeError('Project load forbidden for capability discovery')
+    monkeypatch.setattr(cli_module, '_session_mgr', None)
+    monkeypatch.setattr(cli_module, 'get_session_mgr', forbidden_session_load)
+    result = CliRunner().invoke(cli_module.cli, ['--json', 'capability'])
+    assert result.exit_code == 0, repr(result.exception)
+    payload = json.loads(result.output)
+    assert payload['protocol_version'] == '1'
+    assert payload['status'] == 'success'
+    assert payload['project'] is None
+
+
+def test_capability_version_matches_package(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli_module, '_session_mgr', SessionManager(str(tmp_path / 'session.json')))
+    result = CliRunner().invoke(cli_module.cli, ['--json', 'capability'])
+    assert result.exit_code == 0
+    assert json.loads(result.output)['data']['version'] == __version__
+
+
+def test_capability_probes_missing_geometry_engine(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli_module, '_session_mgr', SessionManager(str(tmp_path / 'session.json')))
+    original_import = builtins.__import__
+    def without_shapely(name, *args, **kwargs):
+        if name == 'shapely' or name.startswith('shapely.'):
+            raise ImportError('Isolated missing-geometry probe')
+        return original_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', without_shapely)
+    result = CliRunner().invoke(cli_module.cli, ['--json', 'capability'])
+    assert result.exit_code == 0, repr(result.exception)
+    assert json.loads(result.output)['data']['geometry_engine']['available'] is False
+
+
+def test_doctor_checks_session_journal_when_artifact_is_active(tmp_path, monkeypatch):
+    session = tmp_path / 'session.json'
+    artifact = tmp_path / 'active.sh3d'
+    artifact.write_bytes(b'Artifact identity only; doctor must not parse as session JSON')
+    mgr = SessionManager(str(session))
+    mgr.active_file = str(artifact)
+    mgr.save_session()
+    journal = tmp_path / 'session.json.pending'
+    journal.write_text('{}', encoding='utf-8')
+    before = {p: p.read_bytes() for p in (session, artifact, journal)}
+    monkeypatch.setattr(cli_module, '_session_mgr', mgr)
+    result = CliRunner().invoke(cli_module.cli, ['--json', 'doctor'])
+    assert result.output.strip(), repr(result.exception)
+    payload = json.loads(result.output)
+    assert payload['data']['healthy'] is False
+    assert payload['data']['checks']['pending_journal'] is True
+    assert all(p.read_bytes() == raw for p, raw in before.items())
+
+
+def test_doctor_reports_corrupt_session_as_finite_json(tmp_path, monkeypatch):
+    session = tmp_path / 'session.json'
+    session.write_bytes(b'{corrupt')
+    monkeypatch.setattr(session_module, 'SESSION_FILE', str(session))
+    monkeypatch.setattr(cli_module, 'SESSION_FILE', str(session), raising=False)
+    monkeypatch.setattr(cli_module, '_session_mgr', None)
+    monkeypatch.setattr(cli_module, 'SessionManager', lambda: SessionManager(str(session)))
+    result = CliRunner().invoke(cli_module.cli, ['--json', 'doctor'])
+    assert result.output.strip(), repr(result.exception)
+    payload = json.loads(result.output)
+    assert payload['protocol_version'] == '1'
+    if payload['status'] == 'error':
+        assert payload['error']['code']
+    else:
+        assert payload['data']['healthy'] is False
+    assert session.read_bytes() == b'{corrupt'
+
 
 
 

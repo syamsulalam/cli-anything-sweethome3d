@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.12.0 (PAC-1 Contract Iteration 21)  
+**Document Version:** 2.13.0 (PAC-1 Contract Iteration 22)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -228,6 +228,25 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
   - Add `cli doctor` command emitting structured environment and session diagnostics. (`✅ Completed`)
 - [x] **Reconciled Test Suite**:
   - Pass all 8 Round 20 acceptance oracles and integrate into main test suite: **169 total tests passing in 5.70s** (165 core + 4 E2E; 100% green). (`✅ Completed`)
+
+### Phase 17: Sol Round 21 Prescriptions — Universal Sash Admission, Physical Epsilon, Project-Free Capability & Diagnostic Session Authority (PAC-1 Iteration 22)
+- [x] **R21-P1-01: Universal Native Sash Admission & Physical Precision Matching (Gates N03, N07, N09, C06, C07, E02, E07)**:
+  - Check native sashes unconditionally regardless of whether `cli-anything.opening.v1` metadata property is present.
+  - Refuse unsupported multileaf native sashes (`ValueError("Unsupported native multileaf sash operation...")`).
+  - Use physical error calculation for single-leaf presets ($e \le 0.01\text{ cm}$ total error sum) over piece width/depth/arc length, refusing if error $> 0.01\text{ cm}$. (`✅ Completed`)
+- [x] **R21-P1-02: Project-Free Discovery & Truthful Package Capability Manifest (Gates A01, A04, A07, N01, E07)**:
+  - Add `include_project=True` parameter to `output_result()`. When `include_project=False`, output `"project": None` without accessing `session_mgr`.
+  - In `capability_cmd`, invoke `output_result(ctx, manifest, include_project=False)`.
+  - Report package version from `cli_anything.sweethome3d.__version__`.
+  - Dynamically probe `geometry_engine.available` via `import shapely`. (`✅ Completed`)
+- [x] **R21-P1-03: Read-Only Doctor with Session Path Authority & Safe Corrupt Handling (Gates A04, A08, S06, S12)**:
+  - Resolve authoritative `session_path` safely from `session_mgr.session_path` or `session_module.SESSION_FILE` without substituting `active_file`. Keep `active_file` as separate artifact metadata.
+  - Check journal path at `session_path + ".pending"`.
+  - Catch corrupt session JSON without crashing, reporting `healthy: False`, `checks: {model_valid: False}`, and structured error findings under `include_project=False`. (`✅ Completed`)
+- [x] **Reconciled Test Suite**:
+  - Pass all 7 Round 21 acceptance oracles from `REPORT/2026-10-26_SweetHome3D_CLI_Round21_Acceptance_Oracles.py`.
+  - Verify full repository test suite: **176 total tests passing in 7.58s** (172 core + 4 E2E; 100% green). (`✅ Completed`)
+
 
 
 

@@ -2123,7 +2123,55 @@ class HomeModel:
 
             offset_cm = float(elem.attrib["offset"]) if "offset" in elem.attrib else None
 
-            # PAC-1 N02, R18-P1-02, R19-P1-02: Check for cli-anything.opening.v1 metadata property
+            # PAC-1 N02, N03, N07, N09, R19-P1-02, R20-P1-01, R21-P1-01:
+            # 1. Unconditionally validate physical native sashes
+            sashes = elem.findall("sash")
+            native_swing = None
+            if sashes:
+                op_type = "door"
+                if len(sashes) == 1:
+                    first_s = sashes[0]
+                    x_axis = float(first_s.attrib.get("xAxis", "0.0"))
+                    y_axis = float(first_s.attrib.get("yAxis", "0.5"))
+                    width_ratio = float(first_s.attrib.get("width", "1.0"))
+                    start_angle = float(first_s.attrib.get("startAngle", "0.0"))
+                    end_angle = float(first_s.attrib.get("endAngle", "0.0"))
+
+                    depth_val = float(elem.attrib.get("depth", 20.0))
+
+                    def _angle_diff(a, b):
+                        return (a - b + math.pi) % (2 * math.pi) - math.pi
+
+                    # Right preset: (xp=0.0, yp=0.5, wp=1.0, ap0=0.0, ap1=-pi/2)
+                    err_h_r = math.hypot(width_cm * (x_axis - 0.0), depth_val * (y_axis - 0.5))
+                    err_w_r = width_cm * abs(width_ratio - 1.0)
+                    rmax_r = width_cm * max(abs(width_ratio), 1.0)
+                    err_a_r = max(
+                        2 * rmax_r * abs(math.sin(_angle_diff(start_angle, 0.0) / 2)),
+                        2 * rmax_r * abs(math.sin(_angle_diff(end_angle, -math.pi / 2) / 2))
+                    )
+                    tot_err_r = err_h_r + err_w_r + err_a_r
+
+                    # Left preset: (xp=1.0, yp=0.5, wp=1.0, ap0=pi, ap1=3*pi/2 or -pi/2)
+                    err_h_l = math.hypot(width_cm * (x_axis - 1.0), depth_val * (y_axis - 0.5))
+                    err_w_l = width_cm * abs(width_ratio - 1.0)
+                    rmax_l = width_cm * max(abs(width_ratio), 1.0)
+                    err_a_l = max(
+                        2 * rmax_l * abs(math.sin(_angle_diff(start_angle, math.pi) / 2)),
+                        2 * rmax_l * abs(math.sin(_angle_diff(end_angle, 3 * math.pi / 2) / 2))
+                    )
+                    tot_err_l = err_h_l + err_w_l + err_a_l
+
+                    if tot_err_r <= 0.01:
+                        native_swing = "right"
+                    elif tot_err_l <= 0.01:
+                        native_swing = "left"
+                    else:
+                        raise ValueError(f"Unsupported native sash operation on door '{op_id}'; import refused")
+                else:
+                    raise ValueError(f"Unsupported native multileaf sash operation ({len(sashes)} sashes) on door '{op_id}'; import refused")
+
+            # 2. Check for cli-anything.opening.v1 metadata property
             meta_prop = elem.find("property[@name='cli-anything.opening.v1']")
             if meta_prop is not None and meta_prop.attrib.get("value"):
                 try:
@@ -2137,48 +2185,19 @@ class HomeModel:
                             offset_cm = float(meta["offset_cm"])
                 except Exception:
                     pass
+            elif native_swing is not None:
+                swing = native_swing
             else:
-                sashes = elem.findall("sash")
-                if sashes:
-                    op_type = "door"
-                    if len(sashes) == 1:
-                        first_s = sashes[0]
-                        x_axis = float(first_s.attrib.get("xAxis", "0.0"))
-                        y_axis = float(first_s.attrib.get("yAxis", "0.5"))
-                        width_ratio = float(first_s.attrib.get("width", "1.0"))
-                        start_angle = float(first_s.attrib.get("startAngle", "0.0"))
-                        end_angle = float(first_s.attrib.get("endAngle", "0.0"))
-
-                        is_std_right = (
-                            abs(x_axis - 0.0) < 1e-4 and
-                            abs(y_axis - 0.5) < 1e-4 and
-                            abs(width_ratio - 1.0) < 1e-4 and
-                            abs(start_angle - 0.0) < 1e-4 and
-                            abs(end_angle - (-math.pi / 2)) < 1e-4
-                        )
-                        is_std_left = (
-                            abs(x_axis - 1.0) < 1e-4 and
-                            abs(y_axis - 0.5) < 1e-4 and
-                            abs(width_ratio - 1.0) < 1e-4 and
-                            abs(start_angle - math.pi) < 1e-4 and
-                            abs(end_angle - (3 * math.pi / 2)) < 1e-4
-                        )
-                        if is_std_right:
-                            swing = "right"
-                        elif is_std_left:
-                            swing = "left"
-                        else:
-                            raise ValueError(f"Unsupported native sash operation on door '{op_id}'; import refused")
-                    else:
-                        raise ValueError(f"Unsupported native multileaf sash operation ({len(sashes)} sashes) on door '{op_id}'; import refused")
+                elem_name = elem.attrib.get("name")
+                if elem.attrib.get("type") == "window" or (elem_name and "window" in elem_name.lower()):
+                    op_type = "window"
+                    swing = "none"
                 else:
-                    elem_name = elem.attrib.get("name")
-                    if elem.attrib.get("type") == "window" or (elem_name and "window" in elem_name.lower()):
-                        op_type = "window"
-                        swing = "none"
-                    else:
-                        op_type = elem.attrib.get("type", "door")
-                        swing = elem.attrib.get("swing", "right")
+                    op_type = elem.attrib.get("type", "door")
+                    swing = elem.attrib.get("swing", "right")
+
+            if native_swing is not None and meta_prop is None:
+                swing = native_swing
 
             elevation_cm = float(elem.attrib.get("elevation", 0.0))
             depth_cm = float(elem.attrib["depth"]) if "depth" in elem.attrib else None
