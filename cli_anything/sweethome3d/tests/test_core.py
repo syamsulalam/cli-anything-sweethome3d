@@ -3221,6 +3221,66 @@ mgr.save_file(sys.argv[2])
     assert payload['data']['checks']['pending_journal'] is True
 
 
+@pytest.mark.parametrize('case', [
+    'boolean_version', 'float_version', 'window_kind_with_hinged_sash',
+    'unknown_kind', 'missing_operation', 'boolean_host', 'negative_station',
+    'nonfinite_station', 'conflicting_owned_records',
+])
+def test_owned_opening_record_is_validated_as_one_typed_contract(case):
+    """Gate N07/N09, C01/C06/C07, E02/E07 (R23-P1-01): Owned opening record strict typed validation."""
+    root = ET.Element('home', version='7400')
+    ET.SubElement(root, 'level', id='level1', name='Ground', elevation='0',
+                  floorThickness='12', height='280')
+    door = ET.SubElement(root, 'doorOrWindow', id='door', name='Native',
+                         level='level1', x='100', y='0', angle='0',
+                         width='200', depth='20', height='210')
+    ET.SubElement(door, 'sash', xAxis='0', yAxis='.5', width='1',
+                  startAngle='0', endAngle=str(-math.pi / 2))
+    meta = {'version': 1, 'kind': 'door', 'operation': 'right',
+            'host_id': None, 'offset_cm': 0}
+    changes = {
+        'boolean_version': {'version': True},
+        'float_version': {'version': 1.0},
+        'window_kind_with_hinged_sash': {'kind': 'window'},
+        'unknown_kind': {'kind': 'chair'},
+        'boolean_host': {'host_id': False},
+        'negative_station': {'offset_cm': -1},
+        'nonfinite_station': {'offset_cm': float('nan')},
+    }
+    meta.update(changes.get(case, {}))
+    if case == 'missing_operation':
+        del meta['operation']
+    ET.SubElement(door, 'property', name='cli-anything.opening.v1',
+                  value=json.dumps(meta))
+    if case == 'conflicting_owned_records':
+        ET.SubElement(door, 'property', name='cli-anything.opening.v1',
+                      value=json.dumps(dict(meta, operation='left')))
+    with pytest.raises(ValueError):
+        HomeModel.from_xml(ET.tostring(root, encoding='unicode'))
+
+
+@pytest.mark.parametrize('revision', [True, -1, '1', float('nan')],
+                         ids=['boolean', 'negative', 'string', 'nonfinite'])
+def test_doctor_rejects_invalid_present_session_revision(tmp_path, monkeypatch, revision):
+    """Gate A08/A04/A07, S10/S12 (R23-P1-02): Doctor rejects invalid present session revisions."""
+    session = tmp_path / 'session.json'
+    mgr = SessionManager(str(session))
+    mgr.save_session()
+    data = json.loads(session.read_text(encoding='utf-8'))
+    data['revision'] = revision
+    raw = json.dumps(data)
+    session.write_text(raw, encoding='utf-8')
+    monkeypatch.setattr(cli_module, '_session_mgr', mgr)
+    result = CliRunner().invoke(cli_module.cli, ['--json', 'doctor'])
+    assert result.output.strip(), repr(result.exception)
+    payload = json.loads(result.output)
+    assert payload['protocol_version'] == '1'
+    assert payload['data']['healthy'] is False
+    assert any(f.get('severity') == 'error' for f in payload['data']['findings'])
+    assert session.read_text(encoding='utf-8') == raw
+
+
+
 
 
 

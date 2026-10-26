@@ -9,6 +9,7 @@ from cli_anything.sweethome3d.core import (
     SessionManager,
     FURNITURE_CATALOG,
     DimensionLine,
+    strict_json_loads,
     export_svg,
     export_dxf,
     export_json,
@@ -1065,10 +1066,24 @@ def capability_cmd(ctx):
     }
     output_result(ctx, manifest, include_project=False)
 
+def decode_diagnostic_session(text):
+    """Strictly validates diagnostic session envelope and root schema (PAC-1 A08, R23-P1-02)."""
+    data = strict_json_loads(text)
+    if type(data) is not dict:
+        raise ValueError("Session JSON root must be an object")
+    if type(data.get("model")) is not dict:
+        raise ValueError("Session model must be an object")
+    if "revision" in data and (
+        type(data["revision"]) is not int or data["revision"] < 0
+    ):
+        raise ValueError("Session revision must be a nonnegative integer")
+    return data
+
+
 @cli.command(name="doctor")
 @click.pass_context
 def doctor_cmd(ctx):
-    """Runs comprehensive environment, session journal, and geometry diagnostics (Gate A08, R21-P1-03, R22-P1-02)."""
+    """Runs comprehensive environment, session journal, and geometry diagnostics (Gate A08, R21-P1-03, R22-P1-02, R23-P1-02)."""
     shapely_ok = False
     try:
         import shapely
@@ -1093,21 +1108,24 @@ def doctor_cmd(ctx):
     if session_exists:
         try:
             with open(session_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                model_valid = False
-                model_findings.append({"code": "INVALID_SESSION_SHAPE", "severity": "error", "message": "Session JSON root must be an object"})
-            elif "model" not in data or not isinstance(data["model"], dict):
-                model_valid = False
-                model_findings.append({"code": "MISSING_SESSION_MODEL", "severity": "error", "message": "Session JSON missing 'model' object"})
-            else:
-                model = HomeModel.from_dict(data["model"])
-                val = model.validate()
-                model_valid = val.get("valid", True)
-                model_findings = val.get("findings", [])
+                raw_text = f.read()
+            data = decode_diagnostic_session(raw_text)
+            model = HomeModel.from_dict(data["model"])
+            val = model.validate()
+            model_valid = val.get("valid", True)
+            model_findings = val.get("findings", [])
         except Exception as e:
             model_valid = False
-            model_findings.append({"code": "SESSION_CORRUPT", "severity": "error", "message": str(e)})
+            msg = str(e)
+            if "Session JSON root must be an object" in msg:
+                code = "INVALID_SESSION_SHAPE"
+            elif "Session model must be an object" in msg:
+                code = "MISSING_SESSION_MODEL"
+            elif "Session revision must be a nonnegative integer" in msg:
+                code = "INVALID_SESSION_REVISION"
+            else:
+                code = "SESSION_CORRUPT"
+            model_findings.append({"code": code, "severity": "error", "message": msg})
     elif mgr and getattr(mgr, "model", None):
         try:
             val = mgr.model.validate()

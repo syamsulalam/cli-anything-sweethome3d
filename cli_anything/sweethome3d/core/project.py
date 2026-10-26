@@ -16,6 +16,62 @@ from cli_anything.sweethome3d.core.furniture import Furniture
 from cli_anything.sweethome3d.core.dimension import DimensionLine
 
 
+def strict_json_loads(text):
+    """Parses JSON text strictly, refusing nonfinite constants (NaN, Infinity) and nonfinite floats."""
+    def reject_constant(token):
+        raise ValueError(f"Nonfinite JSON constant: {token}")
+
+    def finite_float(token):
+        value = float(token)
+        if not math.isfinite(value):
+            raise ValueError(f"Nonfinite JSON number: {token}")
+        return value
+
+    return json.loads(text, parse_constant=reject_constant, parse_float=finite_float)
+
+
+def decode_opening_record(element, native_swing=None):
+    """Decodes and strictly validates all cli-anything.opening.v1 metadata records on an element."""
+    fields = {"version", "kind", "operation", "host_id", "offset_cm"}
+    props = element.findall("property[@name='cli-anything.opening.v1']")
+    resolved = None
+    for prop in props:
+        try:
+            record = strict_json_loads(prop.get("value", ""))
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValueError(f"Corrupt opening metadata: {exc}") from exc
+        if type(record) is not dict or set(record) != fields:
+            raise ValueError("Unsupported opening metadata fields")
+        if type(record["version"]) is not int or record["version"] != 1:
+            raise ValueError("Unsupported opening metadata version")
+        if type(record["kind"]) is not str or record["kind"] not in ("door", "window"):
+            raise ValueError("Unsupported opening metadata kind")
+        if (type(record["operation"]) is not str or
+                record["operation"] not in ("left", "right", "none", "sliding")):
+            raise ValueError("Unsupported opening metadata operation")
+        host = record["host_id"]
+        if host is not None and (type(host) is not str or not host):
+            raise ValueError("Invalid opening metadata host_id")
+        value = record["offset_cm"]
+        if type(value) not in (int, float):
+            raise ValueError("Opening metadata station must be numeric")
+        try:
+            station = float(value)
+        except (ValueError, OverflowError) as exc:
+            raise ValueError("Invalid opening metadata station") from exc
+        if not math.isfinite(station) or station < 0:
+            raise ValueError("Opening metadata station must be finite and nonnegative")
+        record = dict(record, offset_cm=station)
+        if native_swing is not None and (
+            record["kind"] != "door" or record["operation"] != native_swing
+        ):
+            raise ValueError("Opening metadata conflicts with native sash; import refused")
+        if resolved is not None and resolved != record:
+            raise ValueError("Conflicting owned opening metadata records")
+        resolved = record
+    return resolved
+
+
 def _resolve_curved_wall_circle(w):
     """Analytically calculates circle center (cx, cy) and radius r for a curved wall.
     
@@ -2171,27 +2227,14 @@ class HomeModel:
                 else:
                     raise ValueError(f"Unsupported native multileaf sash operation ({len(sashes)} sashes) on door '{op_id}'; import refused")
 
-            # 2. Check for cli-anything.opening.v1 metadata property
-            meta_prop = elem.find("property[@name='cli-anything.opening.v1']")
-            if meta_prop is not None and meta_prop.attrib.get("value"):
-                try:
-                    meta = json.loads(meta_prop.attrib["value"])
-                except Exception as e:
-                    raise ValueError(f"Corrupt cli-anything.opening metadata on door '{op_id}': {e}") from e
-
-                if not isinstance(meta, dict) or meta.get("version") != 1:
-                    raise ValueError(f"Unsupported cli-anything.opening metadata version {meta.get('version') if isinstance(meta, dict) else type(meta)}; import refused")
-
-                meta_op = meta.get("operation")
-                if native_swing is not None and meta_op is not None and meta_op != native_swing:
-                    raise ValueError(f"Metadata operation '{meta_op}' conflicts with native sash operation '{native_swing}' on door '{op_id}'; import refused")
-
-                op_type = meta.get("kind", op_type)
-                swing = meta_op if meta_op is not None else (native_swing or swing)
-                if meta.get("host_id"):
-                    wall_id = meta["host_id"]
-                if meta.get("offset_cm") is not None:
-                    offset_cm = float(meta["offset_cm"])
+            # 2. Check and decode cli-anything.opening.v1 metadata properties (PAC-1 N07, N09, R23-P1-01)
+            resolved_meta = decode_opening_record(elem, native_swing=native_swing)
+            if resolved_meta is not None:
+                op_type = resolved_meta["kind"]
+                swing = resolved_meta["operation"]
+                if resolved_meta["host_id"]:
+                    wall_id = resolved_meta["host_id"]
+                offset_cm = resolved_meta["offset_cm"]
             elif native_swing is not None:
                 swing = native_swing
             else:
@@ -2202,9 +2245,6 @@ class HomeModel:
                 else:
                     op_type = elem.attrib.get("type", "door")
                     swing = elem.attrib.get("swing", "right")
-
-            if native_swing is not None and meta_prop is None:
-                swing = native_swing
 
             elevation_cm = float(elem.attrib.get("elevation", 0.0))
             depth_cm = float(elem.attrib["depth"]) if "depth" in elem.attrib else None

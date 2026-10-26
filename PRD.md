@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.14.0 (PAC-1 Contract Iteration 23)  
+**Document Version:** 2.15.0 (PAC-1 Contract Iteration 24)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -257,6 +257,24 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
 - [x] **Reconciled Test Suite**:
   - Pass all 5 Round 22 acceptance oracles from `REPORT/2026-10-26_SweetHome3D_CLI_Round22_Acceptance_Oracles.py`.
   - Verify full repository test suite: **181 total tests passing in 7.54s** (177 core + 4 E2E; 100% green). (`✅ Completed`)
+
+### Phase 19: Sol Round 23 Prescriptions — Typed Opening Record Contract & Diagnostic Revision Validation (PAC-1 Iteration 24)
+- [x] **R23-P1-01: One Typed Owned Opening Record Contract & Physical Consistency (Gates N07, N09, C01, C06, C07, E02, E07)**:
+  - Add `strict_json_loads(text)` rejecting constants (`NaN`, `Infinity`, `-Infinity`) and nonfinite numbers.
+  - Implement `decode_opening_record(element, native_swing=None)` validating exact schema fields `{"version", "kind", "operation", "host_id", "offset_cm"}`.
+  - Enforce exact integer version `type(record["version"]) is int and record["version"] == 1` (rejecting `bool` and `float`).
+  - Validate `kind` in `("door", "window")`; enforce that hinged native sashes cannot have kind `"window"` (`Opening metadata conflicts with native sash; import refused`).
+  - Enforce valid operations `("left", "right", "none", "sliding")`.
+  - Validate `host_id` is `None` or non-empty `str`.
+  - Validate `offset_cm` is non-negative finite numeric (`int` or `float`).
+  - Detect duplicate or conflicting owned records across all `property[@name='cli-anything.opening.v1']` elements, refusing conflicts with `ValueError`. (`✅ Completed`)
+- [x] **R23-P1-02: Passive Doctor Session Root Revision & Schema Envelope Validation (Gates A04, A07, A08, S10, S12)**:
+  - In `doctor_cmd`, parse session JSON using `strict_json_loads` to reject nonfinite tokens (`NaN`, `Infinity`).
+  - Validate session `revision`: if present, enforce `type(data["revision"]) is int and data["revision"] >= 0` (rejecting `bool`, negative integers, strings, floats). Emit structured finding `INVALID_SESSION_REVISION` with `severity: "error"` and set `model_valid = False` (`healthy = False`).
+  - Preserve diagnostic passivity (never construct `SessionManager`, never apply pending recovery, never alter files). (`✅ Completed`)
+- [x] **Reconciled Test Suite**:
+  - Pass all 13 Round 23 acceptance oracles from `REPORT/2026-10-26_SweetHome3D_CLI_Round23_Acceptance_Oracles.py`.
+  - Verify full repository test suite: **194 total tests passing in 9.22s** (190 core + 4 E2E; 100% green). (`✅ Completed`)
 
 
 
