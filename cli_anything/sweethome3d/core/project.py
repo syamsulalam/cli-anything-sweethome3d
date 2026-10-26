@@ -1,4 +1,5 @@
 import os
+import copy
 import math
 import json
 import zipfile
@@ -14,6 +15,11 @@ from cli_anything.sweethome3d.core.room import Room
 from cli_anything.sweethome3d.core.opening import Opening
 from cli_anything.sweethome3d.core.furniture import Furniture
 from cli_anything.sweethome3d.core.dimension import DimensionLine
+from cli_anything.sweethome3d.core.exceptions import (
+    EntityConflictError,
+    ValidationRejectedError,
+    UnsupportedFeatureError,
+)
 from cli_anything.sweethome3d.core.native_contract import (
     decode_angle,
     encode_angle,
@@ -484,7 +490,7 @@ class HomeModel:
                  level_id="level1", arc_extent=0.0, extra_attribs=None, extra_children=None, replace=False):
         wall_id = str(wall_id)
         if wall_id in self.walls and not replace:
-            raise ValueError(f"Wall with ID '{wall_id}' already exists in project.")
+            raise EntityConflictError(f"Wall with ID '{wall_id}' already exists in project.")
         h = height if height is not None else self.wall_height
         w = Wall(wall_id, x_start, y_start, x_end, y_end, thickness, h, level_id, arc_extent,
                  extra_attribs, extra_children)
@@ -577,17 +583,21 @@ class HomeModel:
         wall = self.walls[wall_id]
         total_len = wall.length
 
-        # Atomic rollback snapshots
-        wall_snapshot = dict(wall.__dict__)
-        wall_attribs_snapshot = dict(wall.extra_attribs)
-        wall_children_snapshot = list(wall.extra_children)
-        openings_snapshot = {
-            op.id: dict(op.__dict__)
-            for op in self.openings.values()
-            if op.wall_id == wall_id
-        }
+        # Atomic rollback snapshots across all direct objects (PAC-1 T06, R30)
+        old_walls, old_openings = dict(self.walls), dict(self.openings)
+        states = [(obj, copy.deepcopy(obj.__dict__))
+                  for obj in [*old_walls.values(), *old_openings.values()]]
 
         try:
+            # Pre-validate all opening intervals upfront without silent clamping
+            for op in self.openings.values():
+                if op.wall_id == wall_id:
+                    if op.offset_cm < 0.0 or op.width_cm < 0.0 or (op.offset_cm + op.width_cm) > total_len + 1e-4:
+                        raise ValueError(f"Opening '{op.id}' interval [{op.offset_cm}, {op.offset_cm + op.width_cm}] exceeds wall length {total_len}")
+                    new_offset = total_len - op.offset_cm - op.width_cm
+                    if new_offset < -1e-4:
+                        raise ValueError(f"Opening '{op.id}' reversed interval would be negative: {new_offset}")
+
             # Pre-validate sloped height if present before changing object state
             if "heightAtEnd" in wall.extra_attribs:
                 old_h = wall.height
@@ -611,7 +621,9 @@ class HomeModel:
             for op in self.openings.values():
                 if op.wall_id == wall_id:
                     new_offset = total_len - op.offset_cm - op.width_cm
-                    op.offset_cm = max(0.0, round(new_offset, 4))
+                    if new_offset < -1e-4 or new_offset + op.width_cm > total_len + 1e-4:
+                        raise ValueError(f"Opening '{op.id}' reversed interval out of bounds: {new_offset}")
+                    op.offset_cm = round(new_offset, 4)
                     # Pin all 3 resolved pose fields (center and physical angle) unconditionally
                     if op.id in door_poses and door_poses[op.id]:
                         p = door_poses[op.id]
@@ -668,13 +680,12 @@ class HomeModel:
 
             return wall
         except Exception:
-            # Atomic rollback on failure
-            wall.__dict__.update(wall_snapshot)
-            wall.extra_attribs = wall_attribs_snapshot
-            wall.extra_children = wall_children_snapshot
-            for op_id, op_snap in openings_snapshot.items():
-                if op_id in self.openings:
-                    self.openings[op_id].__dict__.update(op_snap)
+            # Atomic rollback on failure restoring all touched objects
+            for obj, state in states:
+                obj.__dict__.clear()
+                obj.__dict__.update(state)
+            self.walls.clear(); self.walls.update(old_walls)
+            self.openings.clear(); self.openings.update(old_openings)
             raise
 
     def split_wall(self, wall_id, split_offset_cm, new_wall_id=None):
@@ -707,73 +718,95 @@ class HomeModel:
 
         new_id = str(new_wall_id or f"{wall_id}_seg2")
         if new_id in self.walls:
-            raise ValueError(f"Wall ID '{new_id}' already exists in project.")
+            raise EntityConflictError(f"Wall ID '{new_id}' already exists in project.")
 
-        split_pt = wall.point_at_offset(split_s)
-        old_x_end = wall.x_end
-        old_y_end = wall.y_end
+        # Atomic rollback snapshot across direct objects (PAC-1 T06, R30)
+        old_walls, old_openings = dict(self.walls), dict(self.openings)
+        states = [(obj, copy.deepcopy(obj.__dict__))
+                  for obj in [*old_walls.values(), *old_openings.values()]]
 
-        # Create second segment: from split_pt to old end
-        wall2 = Wall(
-            wall_id=new_id,
-            x_start=split_pt[0],
-            y_start=split_pt[1],
-            x_end=old_x_end,
-            y_end=old_y_end,
-            thickness=wall.thickness,
-            height=wall.height,
-            level_id=wall.level_id,
-            arc_extent=0.0,
-            extra_attribs=dict(wall.extra_attribs),
-            extra_children=list(wall.extra_children),
-        )
-        if wall.arc_extent != 0.0:
-            frac = (total_len - split_s) / total_len
-            wall2.arc_extent = wall.arc_extent * frac
-            wall.arc_extent = wall.arc_extent * (split_s / total_len)
+        try:
+            # Pre-validate sloped wall height if present before changing object state
+            old_h0 = wall.height
+            old_h1 = old_h0
+            has_slope = "heightAtEnd" in wall.extra_attribs
+            if has_slope:
+                old_h1_str = wall.extra_attribs.get("heightAtEnd")
+                if old_h1_str is not None:
+                    old_h1 = float(old_h1_str)
+                    if not math.isfinite(old_h1):
+                        raise ValueError("heightAtEnd must be finite")
+                ha = old_h0 + (old_h1 - old_h0) * (split_s / total_len)
 
-        # Update first segment to end at split_pt
-        wall.x_end = split_pt[0]
-        wall.y_end = split_pt[1]
+            split_pt = wall.point_at_offset(split_s)
+            old_x_end = wall.x_end
+            old_y_end = wall.y_end
 
-        # Sloped wall height interpolation
-        old_h0 = wall.height
-        old_h1_str = wall.extra_attribs.get("heightAtEnd")
-        if old_h1_str is not None:
-            old_h1 = float(old_h1_str)
-            ha = old_h0 + (old_h1 - old_h0) * (split_s / total_len)
-            wall.height = old_h0
-            wall.extra_attribs["heightAtEnd"] = str(round(ha, 4))
-            wall2.height = ha
-            wall2.extra_attribs["heightAtEnd"] = str(round(old_h1, 4))
+            # Create second segment: from split_pt to old end
+            wall2 = Wall(
+                wall_id=new_id,
+                x_start=split_pt[0],
+                y_start=split_pt[1],
+                x_end=old_x_end,
+                y_end=old_y_end,
+                thickness=wall.thickness,
+                height=wall.height,
+                level_id=wall.level_id,
+                arc_extent=0.0,
+                extra_attribs=dict(wall.extra_attribs),
+                extra_children=list(wall.extra_children),
+            )
+            if wall.arc_extent != 0.0:
+                frac = (total_len - split_s) / total_len
+                wall2.arc_extent = wall.arc_extent * frac
+                wall.arc_extent = wall.arc_extent * (split_s / total_len)
 
-        # Retarget native endpoint joins:
-        # wall2 inherits old wallAtEnd, and internal reciprocal joins connect wall <-> wall2
-        old_end_join = wall.extra_attribs.pop("wallAtEnd", None)
-        if old_end_join is not None:
-            wall2.extra_attribs["wallAtEnd"] = old_end_join
-        wall.extra_attribs["wallAtEnd"] = new_id
-        wall2.extra_attribs["wallAtStart"] = wall_id
+            # Update first segment to end at split_pt
+            wall.x_end = split_pt[0]
+            wall.y_end = split_pt[1]
 
-        # Retarget any neighboring wall pointing to wall_id at the old end
-        for other in self.walls.values():
-            if other.id != wall_id and other.id != new_id:
-                if other.extra_attribs.get("wallAtStart") == wall_id:
-                    if math.hypot(other.x_start - old_x_end, other.y_start - old_y_end) < 1.0:
-                        other.extra_attribs["wallAtStart"] = new_id
-                if other.extra_attribs.get("wallAtEnd") == wall_id:
-                    if math.hypot(other.x_end - old_x_end, other.y_end - old_y_end) < 1.0:
-                        other.extra_attribs["wallAtEnd"] = new_id
+            # Apply interpolated sloped wall heights
+            if has_slope:
+                wall.height = old_h0
+                wall.extra_attribs["heightAtEnd"] = str(round(ha, 4))
+                wall2.height = ha
+                wall2.extra_attribs["heightAtEnd"] = str(round(old_h1, 4))
 
-        self.walls[new_id] = wall2
+            # Retarget native endpoint joins:
+            # wall2 inherits old wallAtEnd, and internal reciprocal joins connect wall <-> wall2
+            old_end_join = wall.extra_attribs.pop("wallAtEnd", None)
+            if old_end_join is not None:
+                wall2.extra_attribs["wallAtEnd"] = old_end_join
+            wall.extra_attribs["wallAtEnd"] = new_id
+            wall2.extra_attribs["wallAtStart"] = wall_id
 
-        # Re-assign openings beyond split point to wall2
-        for op in self.openings.values():
-            if op.wall_id == wall_id and op.offset_cm >= split_s:
-                op.wall_id = new_id
-                op.offset_cm = round(op.offset_cm - split_s, 4)
+            # Retarget any neighboring wall pointing to wall_id at the old end
+            for other in self.walls.values():
+                if other.id != wall_id and other.id != new_id:
+                    if other.extra_attribs.get("wallAtStart") == wall_id:
+                        if math.hypot(other.x_start - old_x_end, other.y_start - old_y_end) < 1.0:
+                            other.extra_attribs["wallAtStart"] = new_id
+                    if other.extra_attribs.get("wallAtEnd") == wall_id:
+                        if math.hypot(other.x_end - old_x_end, other.y_end - old_y_end) < 1.0:
+                            other.extra_attribs["wallAtEnd"] = new_id
 
-        return wall, wall2
+            self.walls[new_id] = wall2
+
+            # Re-assign openings beyond split point to wall2
+            for op in self.openings.values():
+                if op.wall_id == wall_id and op.offset_cm >= split_s:
+                    op.wall_id = new_id
+                    op.offset_cm = round(op.offset_cm - split_s, 4)
+
+            return wall, wall2
+        except Exception:
+            # Atomic rollback restoring direct objects and maps
+            for obj, state in states:
+                obj.__dict__.clear()
+                obj.__dict__.update(state)
+            self.walls.clear(); self.walls.update(old_walls)
+            self.openings.clear(); self.openings.update(old_openings)
+            raise
 
 
     # Room methods
@@ -782,7 +815,7 @@ class HomeModel:
         """Adds an architectural room polygon, optionally generating perimeter boundary walls."""
         room_id = str(room_id)
         if room_id in self.rooms and not replace:
-            raise ValueError(f"Room with ID '{room_id}' already exists in project.")
+            raise EntityConflictError(f"Room with ID '{room_id}' already exists in project.")
         r = Room(room_id, name, points, level_id, floor_color, extra_attribs=extra_attribs, extra_children=extra_children)
         self.rooms[r.id] = r
         if with_walls and len(r.points) >= 3:
@@ -803,7 +836,7 @@ class HomeModel:
                     extra_attribs=None, extra_children=None, replace=False):
         opening_id = str(opening_id)
         if opening_id in self.openings and not replace:
-            raise ValueError(f"Opening with ID '{opening_id}' already exists in project.")
+            raise EntityConflictError(f"Opening with ID '{opening_id}' already exists in project.")
         if wall_id is not None and wall_id not in self.walls:
             raise ValueError(f"Wall '{wall_id}' does not exist.")
         wall = self.walls.get(wall_id) if wall_id else None
@@ -827,7 +860,7 @@ class HomeModel:
                       angle_deg=0.0, level_id="level1", room_id=None, extra_attribs=None, extra_children=None, replace=False):
         furniture_id = str(furniture_id)
         if furniture_id in self.furniture and not replace:
-            raise ValueError(f"Furniture with ID '{furniture_id}' already exists in project.")
+            raise EntityConflictError(f"Furniture with ID '{furniture_id}' already exists in project.")
         f = Furniture(furniture_id, name, catalog_id, x_cm, y_cm, elevation_cm,
                       width_cm, depth_cm, height_cm, angle_deg, level_id,
                       room_id=room_id, extra_attribs=extra_attribs, extra_children=extra_children)
@@ -846,7 +879,7 @@ class HomeModel:
                       extra_attribs=None, extra_children=None, replace=False):
         dimension_id = str(dimension_id)
         if dimension_id in self.dimensions and not replace:
-            raise ValueError(f"Dimension line with ID '{dimension_id}' already exists in project.")
+            raise EntityConflictError(f"Dimension line with ID '{dimension_id}' already exists in project.")
         dim = DimensionLine(dimension_id, x_start, y_start, x_end, y_end, offset_cm, level_id,
                             elevation_cm=elevation_cm, elevation_start_cm=elevation_start_cm,
                             elevation_end_cm=elevation_end_cm,
@@ -2617,28 +2650,41 @@ class HomeModel:
                 extra_children=extra_children,
             )
 
-        if validate:
-            assert_native_model_domain(model)
+        assert_native_model_domain(model)
 
         return model
 
     def save_sh3d(self, filepath):
-        """Saves project as a native .sh3d compressed ZIP archive atomically preserving all resources."""
-        # PAC-1 N08: Pre-validate all extra zip entries before creating or modifying target
-        for fname, data_bytes in self.extra_zip_entries.items():
-            if fname not in ("Home.xml", "Home"):
-                validate_resource_name(fname)
-                if len(data_bytes) > MAX_ZIP_SINGLE_ENTRY_SIZE:
-                    raise ValueError(f"ZIP entry exceeds single-file size limit: {fname}")
+        """Saves project as a native .sh3d compressed ZIP archive atomically preserving all resources (PAC-1 N08)."""
+        xml_content = self.to_xml()
+        xml_bytes = xml_content.encode("utf-8")
+
+        # Aggregate inventory validation including Home.xml before touching filesystem
+        filtered_entries = {
+            fname: data_bytes
+            for fname, data_bytes in self.extra_zip_entries.items()
+            if fname not in ("Home.xml", "Home")
+        }
+        total_entries = len(filtered_entries) + 1  # +1 for Home.xml
+        if total_entries > MAX_ZIP_ENTRIES:
+            raise ValueError(f"Generated ZIP archive exceeds max entry limit: {total_entries} > {MAX_ZIP_ENTRIES}")
+
+        total_uncompressed = len(xml_bytes)
+        for fname, data_bytes in filtered_entries.items():
+            validate_resource_name(fname)
+            entry_size = len(data_bytes)
+            if entry_size > MAX_ZIP_SINGLE_ENTRY_SIZE:
+                raise ValueError(f"ZIP entry exceeds single-file size limit: {fname}")
+            total_uncompressed += entry_size
+            if total_uncompressed > MAX_ZIP_UNCOMPRESSED_SIZE:
+                raise ValueError(f"Generated ZIP archive exceeds total size limit: {total_uncompressed} > {MAX_ZIP_UNCOMPRESSED_SIZE}")
+
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
         tmp_target = filepath + ".tmp"
-        xml_content = self.to_xml()
         with zipfile.ZipFile(tmp_target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("Home.xml", xml_content)
-            for fname, data_bytes in self.extra_zip_entries.items():
-                # PAC-1 N08, R16-P1-03: Stale alternate guard; do not write stale binary Home next to new Home.xml
-                if fname not in ("Home.xml", "Home"):
-                    zf.writestr(fname, data_bytes)
+            for fname, data_bytes in filtered_entries.items():
+                zf.writestr(fname, data_bytes)
         os.replace(tmp_target, filepath)
         return filepath
 

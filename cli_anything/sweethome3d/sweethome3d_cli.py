@@ -21,6 +21,7 @@ from cli_anything.sweethome3d.utils.sweethome3d_backend import find_sweethome3d,
 from cli_anything.sweethome3d import __version__
 from cli_anything.sweethome3d.core import session as session_module
 from cli_anything.sweethome3d.core.session import RecoveryRequiredError, ConcurrencyConflictError
+from cli_anything.sweethome3d.core.exceptions import EntityConflictError, ValidationRejectedError, UnsupportedFeatureError
 from cli_anything.sweethome3d.core.invocation import resolve_invocation
 
 SESSION_FILE = getattr(session_module, "SESSION_FILE", os.path.expanduser("~/.cli_anything_sweethome3d_session.json"))
@@ -227,14 +228,8 @@ def output_result(ctx, data, human_formatter=None, include_project=True):
         skin.success(str(data))
 
 def classify_error(exc_or_msg):
-    """Maps errors to PAC-1 typed exit codes and machine-readable error codes (PAC-1 A04, R28-P1-05)."""
-    msg = str(exc_or_msg)
-    msg_lower = msg.lower()
-
-    # Unsupported capability or format takes precedence over generic ValueError
-    if "unsupported" in msg_lower or isinstance(exc_or_msg, NotImplementedError):
-        return 5, "UNSUPPORTED"
-
+    """Maps errors to PAC-1 typed exit codes and machine-readable error codes (PAC-1 A04, R28-P1-05, R30)."""
+    # 1. Type hierarchy checking first (exception identity precedes message words)
     if isinstance(exc_or_msg, BaseException):
         chain, seen = [], set()
         curr = exc_or_msg
@@ -242,23 +237,47 @@ def classify_error(exc_or_msg):
             seen.add(id(curr))
             chain.append(curr)
             curr = getattr(curr, "__cause__", None) or getattr(curr, "__context__", None)
+
         for typ, result in (
             (RecoveryRequiredError, (7, "RECOVERY_REQUIRED")),
             (ConcurrencyConflictError, (4, "CONFLICT")),
+            (EntityConflictError, (4, "CONFLICT")),
+            (PermissionError, (6, "IO_ERROR")),
+            (FileNotFoundError, (6, "IO_ERROR")),
             (OSError, (6, "IO_ERROR")),
-            (ValueError, (3, "VALIDATION_REJECTED")),
+            (UnsupportedFeatureError, (5, "UNSUPPORTED")),
+            (NotImplementedError, (5, "UNSUPPORTED")),
+            (ValidationRejectedError, (3, "VALIDATION_REJECTED")),
         ):
             if any(isinstance(item, typ) for item in chain):
                 return result
 
-    if "unresolved recovery journal" in msg or "RECOVERY_REQUIRED" in msg or "recovery" in msg_lower:
+    msg = str(exc_or_msg)
+    msg_lower = msg.lower()
+
+    # 2. String/message fallback patterns for legacy callers
+    if "unresolved recovery journal" in msg or "RECOVERY_REQUIRED" in msg:
         return 7, "RECOVERY_REQUIRED"
-    if "conflict" in msg_lower or "CONFLICT" in msg or "duplicate" in msg_lower or "already exists" in msg_lower:
+    if "already exists in project" in msg_lower or "entityconflicterror" in msg_lower or "conflict" in msg_lower:
         return 4, "CONFLICT"
-    if "access denied" in msg_lower or "permission denied" in msg_lower or "not found" in msg_lower or "no such file" in msg_lower or "io_error" in msg_lower:
+    if "unsupported dialect" in msg_lower or "unsupported project format" in msg_lower or "unsupported feature" in msg_lower:
+        return 5, "UNSUPPORTED"
+    if "access denied" in msg_lower or "permission denied" in msg_lower or "no such file" in msg_lower or "not found" in msg_lower:
         return 6, "IO_ERROR"
-    if "validation" in msg_lower or "invalid" in msg_lower or "zero" in msg_lower or "finite" in msg_lower or "corrupt" in msg_lower:
+    if (
+        "validation rejected" in msg_lower
+        or "invalid split offset" in msg_lower
+        or "cannot split wall across" in msg_lower
+        or "exceeds wall length" in msg_lower
+        or "split offset must be" in msg_lower
+        or "non-finite" in msg_lower
+        or "exceeds physical error budget" in msg_lower
+        or "zero-length" in msg_lower
+        or "corrupted .sh3d file" in msg_lower
+        or "native room point must have" in msg_lower
+    ):
         return 3, "VALIDATION_REJECTED"
+
     return 1, "ERROR"
 
 def output_error(ctx, message, code=1, error_code=None, data=None):

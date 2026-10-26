@@ -378,34 +378,55 @@ def compute_wall_analytic_stations(walls):
                 c_dy = g2["c"][1] - g1["c"][1]
                 c_dist = math.hypot(c_dx, c_dy)
                 if c_dist < 1e-4 and abs(g1["r"] - g2["r"]) < 1e-4:
-                    # Concentric / coincident arcs (PAC-1 T05)
+                    # Concentric / coincident arcs (PAC-1 T05, R30 physical error budget)
                     # Check w2 endpoints on w1
                     for pt in ((w2.x_start, w2.y_start), (w2.x_end, w2.y_end)):
                         phi = math.atan2(pt[1] - g1["c"][1], pt[0] - g1["c"][0])
                         theta1_rad = math.radians(g1["theta_deg"])
-                        # Angular distance along w1 from phi1
                         delta = (g1["phi1"] - phi) if theta1_rad > 0 else (phi - g1["phi1"])
                         delta = delta % (2.0 * math.pi)
-                        if 1e-4 < delta < abs(theta1_rad) - 1e-4:
-                            s1 = g1["r"] * delta
-                            if 1e-4 < s1 < g1["len"] - 1e-4:
-                                stations_by_wall[w1.id].append({
-                                    "station_cm": s1, "point": pt,
-                                    "kind": "coincident_arc_overlap", "peer_id": w2.id
-                                })
+                        s1 = g1["r"] * delta
+                        if abs(s1 - 2.0 * math.pi * g1["r"]) < 0.005:
+                            s1 = 0.0
+                        if abs(s1) < 0.005:
+                            stations_by_wall[w1.id].append({
+                                "station_cm": 0.0, "point": (w1.x_start, w1.y_start),
+                                "kind": "endpoint", "peer_id": w2.id
+                            })
+                        elif abs(s1 - g1["len"]) < 0.005:
+                            stations_by_wall[w1.id].append({
+                                "station_cm": g1["len"], "point": (w1.x_end, w1.y_end),
+                                "kind": "endpoint", "peer_id": w2.id
+                            })
+                        elif 0.005 <= s1 <= g1["len"] - 0.005:
+                            stations_by_wall[w1.id].append({
+                                "station_cm": s1, "point": pt,
+                                "kind": "coincident_arc_overlap", "peer_id": w2.id
+                            })
                     # Check w1 endpoints on w2
                     for pt in ((w1.x_start, w1.y_start), (w1.x_end, w1.y_end)):
                         phi = math.atan2(pt[1] - g2["c"][1], pt[0] - g2["c"][0])
                         theta2_rad = math.radians(g2["theta_deg"])
                         delta = (g2["phi1"] - phi) if theta2_rad > 0 else (phi - g2["phi1"])
                         delta = delta % (2.0 * math.pi)
-                        if 1e-4 < delta < abs(theta2_rad) - 1e-4:
-                            s2 = g2["r"] * delta
-                            if 1e-4 < s2 < g2["len"] - 1e-4:
-                                stations_by_wall[w2.id].append({
-                                    "station_cm": s2, "point": pt,
-                                    "kind": "coincident_arc_overlap", "peer_id": w1.id
-                                })
+                        s2 = g2["r"] * delta
+                        if abs(s2 - 2.0 * math.pi * g2["r"]) < 0.005:
+                            s2 = 0.0
+                        if abs(s2) < 0.005:
+                            stations_by_wall[w2.id].append({
+                                "station_cm": 0.0, "point": (w2.x_start, w2.y_start),
+                                "kind": "endpoint", "peer_id": w1.id
+                            })
+                        elif abs(s2 - g2["len"]) < 0.005:
+                            stations_by_wall[w2.id].append({
+                                "station_cm": g2["len"], "point": (w2.x_end, w2.y_end),
+                                "kind": "endpoint", "peer_id": w1.id
+                            })
+                        elif 0.005 <= s2 <= g2["len"] - 0.005:
+                            stations_by_wall[w2.id].append({
+                                "station_cm": s2, "point": pt,
+                                "kind": "coincident_arc_overlap", "peer_id": w1.id
+                            })
                 else:
                     hits = compute_circle_circle_intersections(
                         g1["c"], g1["r"], g1["theta_deg"], g1["phi1"],

@@ -1,4 +1,6 @@
 import os
+import struct
+import copy
 import sys
 import math
 import builtins
@@ -4079,3 +4081,108 @@ def test_r29_05_public_constructor_failure_has_structured_error(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["protocol_version"] == "1" and payload["status"] == "error"
     assert path.read_bytes() == before
+
+
+# ==============================================================================
+# Round 30 Whole-Root Repair Oracles (PAC-1 Iteration 30)
+# ==============================================================================
+
+def test_r30_01_split_late_failure_restores_direct_wall_and_maps():
+    m = HomeModel(); m.add_wall("w", 0, 0, 400, 0,
+                               extra_attribs={"heightAtEnd": "invalid"})
+    wall = m.walls["w"]; before = copy.deepcopy(m.to_dict())
+    with pytest.raises(ValueError):
+        m.split_wall("w", 200, "tail")
+    assert m.to_dict() == before
+    assert m.walls["w"] is wall and wall.x_end == 400
+
+
+def test_r30_01_reverse_refuses_invalid_host_interval_without_clamping():
+    m = HomeModel(); m.add_wall("w", 0, 0, 400, 0)
+    m.add_opening("d", "Door", wall_id="w", offset_cm=350, width_cm=90)
+    before = copy.deepcopy(m.to_dict())
+    with pytest.raises(ValueError):
+        m.reverse_wall("w")
+    assert m.to_dict() == before
+
+
+def test_r30_02_coincident_station_uses_physical_not_fixed_angular_tolerance():
+    a = Wall("a", 0, 0, 4000, 0, arc_extent=90)
+    radius = a.chord_length / (2 * math.sin(math.pi / 4))
+    start = a.point_at_offset(0.1)  # Distinct boundary, ten times the 0.01cm budget.
+    b = Wall("b", start[0], start[1], 4000, 0,
+             arc_extent=90 - math.degrees(0.1 / radius))
+    records = compute_wall_analytic_stations([a, b])["a"]
+    assert any(abs(rec["station_cm"] - 0.1) < 0.01 for rec in records)
+
+
+def test_r30_02_coincident_endpoint_keeps_peer_incidence():
+    records = compute_wall_analytic_stations([
+        Wall("a", 0, 0, 400, 0, arc_extent=90),
+        Wall("b", 0, 0, 400, 0, arc_extent=90)])
+    for rec in records["a"]:
+        assert "b" in rec.get("peer_ids", [])
+
+
+def test_r30_03_error_budget_reconstructs_quantized_endpoints():
+    w = Wall("w", 99999.999, 0, 99998.999, 0, arc_extent=90)
+    f32 = lambda value: struct.unpack("!f", struct.pack("!f", value))[0]
+    theta = math.radians(w.arc_extent)
+    def center(x1, x2, sweep):
+        chord = abs(x2 - x1)
+        radius = chord / (2 * math.sin(sweep / 2))
+        return ((x1 + x2) / 2, radius * math.cos(sweep / 2))
+    source = center(w.x_start, w.x_end, theta)
+    native = center(f32(w.x_start), f32(w.x_end), f32(theta))
+    expected = math.dist(source, native)
+    assert expected > 0.0009
+    result = compute_curved_wall_error_budget(w)
+    assert result["center_error"] == pytest.approx(expected, rel=1e-6, abs=1e-9)
+
+
+def test_r30_03_validate_false_cannot_bypass_combined_import_admission():
+    good = HomeModel(); good.add_wall("w", 0, 0, 300, 0, arc_extent=90)
+    root = ET.fromstring(good.to_xml()); root.find("wall").set("xEnd", "90000")
+    xml = ET.tostring(root, encoding="unicode")
+    candidate = HomeModel(); candidate.add_wall("w", 0, 0, 90000, 0, arc_extent=90)
+    try:
+        candidate.to_xml(validate=False)
+    except ValueError:
+        with pytest.raises(ValueError):
+            HomeModel.from_xml(xml, validate=False)
+    else:
+        HomeModel.from_xml(xml, validate=False)
+
+
+def test_r30_04_generated_archive_includes_home_in_entry_limit(tmp_path):
+    m = HomeModel(); m.add_wall("w", 0, 0, 300, 0)
+    m.extra_zip_entries = {f"assets/{n}": b"" for n in range(10000)}
+    target = tmp_path / "plan.sh3d"; target.write_bytes(b"predecessor")
+    with pytest.raises(ValueError):
+        m.save_sh3d(str(target))
+    assert target.read_bytes() == b"predecessor"
+
+
+@pytest.mark.parametrize("wall_id", ["ordinary", "unsupported-wall"])
+def test_r30_05_public_duplicate_conflict_does_not_depend_on_user_id(tmp_path, wall_id):
+    path = tmp_path / "session.json"
+    m = HomeModel(); m.add_wall(wall_id, 0, 0, 300, 0)
+    mgr = SessionManager(str(path)); mgr.model = m; mgr.save_session()
+    before = path.read_bytes()
+    result = CliRunner().invoke(command.cli, ["--json", "--session", str(path),
+        "wall", "add", "--id", wall_id, "--x1", "0", "--y1", "0", "--x2", "300", "--y2", "0"])
+    assert result.exit_code == 4, result.output
+    assert json.loads(result.stdout)["error"]["code"] == "CONFLICT"
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("exc,expected", [
+    (RecoveryRequiredError("unsupported journal schema"), (7, "RECOVERY_REQUIRED")),
+    (PermissionError("unsupported access mode"), (6, "IO_ERROR")),
+])
+def test_r30_05_exception_identity_precedes_message_words(exc, expected):
+    assert command.classify_error(exc) == expected
+
+
+def test_r30_05_unknown_internal_valueerror_not_certified_as_domain_rejection():
+    assert command.classify_error(ValueError("unexpected internal branch")) == (1, "ERROR")

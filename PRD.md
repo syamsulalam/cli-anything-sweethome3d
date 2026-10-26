@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.20.0 (PAC-1 Contract Iteration 29)  
+**Document Version:** 2.21.0 (PAC-1 Contract Iteration 30)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -402,3 +402,25 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
   - Full repository test suite expanded to **281 passed in 10.13s** (100% green).
   - All 4 built-in architectural templates validate clean.
   - Clean Open Code Review via `ocr delegate` across 4 production files (0 blockers, 0 warnings, 0 regressions). (`✅ Completed`)
+
+
+### Phase 25: PAC-1 Round 30 Whole-Root Invariant Repairs & Protocol Hardening (Iteration 30)
+- [x] **R28-P1-01 (Atomic Wall Edit Contracts & Opening Interval Validation, Gates T06, A02)**:
+  - In `core/project.py`, `split_wall` moves validation and object snapshot capture ahead of all writes, applying identical atomic rollback on failure to restore direct wall fields and maps.
+  - In `reverse_wall`, strictly validates hosted opening intervals (`op.offset_cm < 0 or op.offset_cm + op.width_cm > wall.length`), raising `ValueError` and rolling back without clamping. (`✅ Completed`)
+- [x] **R28-P1-02 (Physical Error Budget in Coincident Arc Station & Shared Endpoint Incidence, Gates T02, T03, T05)**:
+  - In `core/topology.py`, compute coincident arc angular tolerance dynamically from physical budget ($0.01\text{ cm}$) and radius ($tol = 0.01 / R$) rather than fixed `1e-4` rad, preserving stations at $0.1\text{ cm}$.
+  - Include peer incidence on coincident/shared endpoints in `peer_ids`. (`✅ Completed`)
+- [x] **R28-P1-03 (Reconstruction from float32 Coordinates & Unconditional Import Admission, Gate N03)**:
+  - In `core/native_contract.py`, `compute_curved_wall_error_budget` reconstructs quantized center and radius from float32-cast endpoints `(x1p, y1p, x2p, y2p)`.
+  - In `core/project.py`, `from_xml` enforces `assert_native_model_domain` unconditionally even when `validate=False`. (`✅ Completed`)
+- [x] **R28-P1-04 (Complete Archive Inventory Limit Enforcement, Gate N08)**:
+  - In `core/project.py`, `save_sh3d` validates total entries `len(extra_zip_entries) + 1 <= 10000` and total uncompressed size including `Home.xml` $\le 100\text{ MiB}$ before opening stage or modifying target. (`✅ Completed`)
+- [x] **R28-P1-05 (Explicit Typed Domain Exceptions & Precedence Ordering, Gate A04)**:
+  - Created `core/exceptions.py` with `ValidationRejectedError`, `EntityConflictError`, and `UnsupportedFeatureError`.
+  - In `sweethome3d_cli.py`, `classify_error` prioritizes exception type (`RecoveryRequiredError` -> 7, `ConcurrencyConflictError` / `EntityConflictError` -> 4, `PermissionError` / `OSError` -> 6, `UnsupportedFeatureError` -> 5, `ValidationRejectedError` -> 3, unknown `ValueError` -> 1) ahead of message string matching. (`✅ Completed`)
+- [x] **Test Reconciliation & Oracle Integration**:
+  - All 12 Round 30 repair oracles pass 100% green (`2026-10-27_SweetHome3D_CLI_Round30_Repair_Oracles.py`).
+  - Merged all 12 oracles into `tests/test_core.py`, bringing repository test suite to **293 passed in 12.24s** (100% green).
+  - All 4 built-in architectural templates validate clean.
+  - Clean Open Code Review via `ocr delegate` across 5 production files (0 blockers, 0 warnings, 0 regressions). (`✅ Completed`)

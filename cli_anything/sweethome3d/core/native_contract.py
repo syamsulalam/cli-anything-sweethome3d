@@ -278,20 +278,32 @@ def compute_curved_wall_error_budget(wall, steps=None) -> dict[str, float]:
 
     # PAC-1 N03 / R29: Continuous wire-based curve error budget assessment
     # Wire coordinates check (endpoints and sweep angle)
-    checked_native_float(wall.x_start, coordinate=True)
-    checked_native_float(wall.y_start, coordinate=True)
-    checked_native_float(wall.x_end, coordinate=True)
-    checked_native_float(wall.y_end, coordinate=True)
+    x1p = checked_native_float(wall.x_start, coordinate=True)
+    y1p = checked_native_float(wall.y_start, coordinate=True)
+    x2p = checked_native_float(wall.x_end, coordinate=True)
+    y2p = checked_native_float(wall.y_end, coordinate=True)
     f32_theta_rad = checked_native_float(theta_rad)
 
-    # Reconstruct circle from float32 encoded sweep (continuous path bound)
+    # Reconstruct circle from float32 encoded endpoints and sweep (continuous path bound)
+    cp = math.hypot(x2p - x1p, y2p - y1p)
+    if cp < 1e-6:
+        return {
+            "center_error": 0.0,
+            "radius_error": 0.0,
+            "angle_error": 0.0,
+            "rep_error": 0.0,
+            "total_error": 0.0,
+            "valid": True,
+        }
     sin_half_f32 = math.sin(f32_theta_rad / 2.0)
-    R_prime = c / (2.0 * sin_half_f32) if abs(sin_half_f32) > 1e-6 else R
+    R_prime = cp / (2.0 * sin_half_f32) if abs(sin_half_f32) > 1e-6 else cp
     h_prime = R_prime * math.cos(f32_theta_rad / 2.0)
-    cx_prime = mx - sign * h_prime * nx
-    cy_prime = my - sign * h_prime * ny
+    mpx, mpy = (x1p + x2p) / 2.0, (y1p + y2p) / 2.0
+    npx, npy = -(y2p - y1p) / cp, (x2p - x1p) / cp
+    cx_prime = mpx - sign * h_prime * npx
+    cy_prime = mpy - sign * h_prime * npy
     phi0 = math.atan2(wall.y_start - cy, wall.x_start - cx)
-    phi0_prime = math.atan2(wall.y_start - cy_prime, wall.x_start - cx_prime)
+    phi0_prime = math.atan2(y1p - cy_prime, x1p - cx_prime)
 
     e_center = math.hypot(cx_prime - cx, cy_prime - cy)
     e_radius = abs(R_prime - R)
