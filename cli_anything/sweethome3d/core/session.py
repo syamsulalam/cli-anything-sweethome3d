@@ -55,7 +55,8 @@ def _validate_journal_schema(rec):
         return False
     if rec["expected_revision"] < 0:
         return False
-    if rec["target_revision"] <= rec["expected_revision"]:
+    # PAC-1 S01, R17-P1-05: Journal revision must advance exactly once (target_revision == expected_revision + 1)
+    if rec["target_revision"] != rec["expected_revision"] + 1:
         return False
 
     exp_rev = rec["expected_revision"]

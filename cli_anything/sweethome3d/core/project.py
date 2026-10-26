@@ -114,7 +114,7 @@ def _compute_unique_curved_runs(lvl_walls, epsilon=0.01):
             seg_len = r * seg_angle
             total_length_cm += seg_len
 
-            if len(g["walls"]) == 1 and abs(seg_angle - TWO_PI) >= 1e-4:
+            if len(g["walls"]) == 1 and seg_angle < (math.pi - 1e-4):
                 orig_w = g["walls"][0]
                 unique_segments.append({
                     "x_start": round(orig_w.x_start, 2),
@@ -127,47 +127,33 @@ def _compute_unique_curved_runs(lvl_walls, epsilon=0.01):
                     "level_id": orig_w.level_id,
                     "wall_id": orig_w.id,
                 })
-            elif abs(seg_angle - TWO_PI) < 1e-4:
-                # PAC-1 T05, T09, E08, R16-P1-02: Split full 360° closed circle into two nondegenerate 180° supported arcs
-                for half_idx in (0, 1):
-                    phi_s = (a + half_idx * math.pi) % TWO_PI
-                    phi_e = (phi_s + math.pi) % TWO_PI
+            else:
+                # PAC-1 T05, T09, E08, R16-P1-02, R17-P1-02: Split any arc with span >= pi into n supported subintervals preserving exact gap
+                n = max(1, math.ceil((seg_angle - 1e-7) / math.pi))
+                sub_span = seg_angle / n
+                for i in range(n):
+                    p_start_angle = a + i * sub_span
+                    p_end_angle = a + (i + 1) * sub_span
+                    phi_s = p_start_angle % TWO_PI
+                    phi_e = p_end_angle % TWO_PI
                     xs = cx + r * math.cos(phi_e if rep_w.arc_extent > 0 else phi_s)
                     ys = cy + r * math.sin(phi_e if rep_w.arc_extent > 0 else phi_s)
                     xe = cx + r * math.cos(phi_s if rep_w.arc_extent > 0 else phi_e)
                     ye = cy + r * math.sin(phi_s if rep_w.arc_extent > 0 else phi_e)
-                    half_len = r * math.pi
-                    extent_deg = 180.0 if rep_w.arc_extent > 0 else -180.0
+                    sub_len = r * sub_span
+                    extent_deg = math.degrees(sub_span) if rep_w.arc_extent > 0 else -math.degrees(sub_span)
+                    wid = f"{rep_w.id}_arc{i+1}" if n > 1 else rep_w.id
                     unique_segments.append({
                         "x_start": round(xs, 2),
                         "y_start": round(ys, 2),
                         "x_end": round(xe, 2),
                         "y_end": round(ye, 2),
-                        "length_m": round(half_len / 100.0, 3),
+                        "length_m": round(sub_len / 100.0, 3),
                         "arc_extent": extent_deg,
                         "is_curved": True,
                         "level_id": rep_w.level_id,
-                        "wall_id": f"{rep_w.id}_arc{half_idx+1}",
+                        "wall_id": wid,
                     })
-            else:
-                phi_s = a % TWO_PI
-                phi_e = b % TWO_PI
-                xs = cx + r * math.cos(phi_e if rep_w.arc_extent > 0 else phi_s)
-                ys = cy + r * math.sin(phi_e if rep_w.arc_extent > 0 else phi_s)
-                xe = cx + r * math.cos(phi_s if rep_w.arc_extent > 0 else phi_e)
-                ye = cy + r * math.sin(phi_s if rep_w.arc_extent > 0 else phi_e)
-                extent_deg = math.degrees(seg_angle) if rep_w.arc_extent > 0 else -math.degrees(seg_angle)
-                unique_segments.append({
-                    "x_start": round(xs, 2),
-                    "y_start": round(ys, 2),
-                    "x_end": round(xe, 2),
-                    "y_end": round(ye, 2),
-                    "length_m": round(seg_len / 100.0, 3),
-                    "arc_extent": round(extent_deg, 4),
-                    "is_curved": True,
-                    "level_id": rep_w.level_id,
-                    "wall_id": rep_w.id,
-                })
 
     return total_length_cm, unique_segments
 
@@ -636,7 +622,31 @@ class HomeModel:
                                     raise ValueError(f"Conflicting attribute '{k}' on overlapping segment between {base_w.id} and {other.id}")
                                 merged_attribs[k] = v
 
-                        # PAC-1 T04, T06, N09, R16-P1-01: Merge extra children with semantic property validation
+                        # PAC-1 T04, T06, N09, R16-P1-01, R17-P1-01: Merge extra children with semantic property validation and side-role normalization
+                        def _normalize_child_xml(child_str, is_aligned):
+                            if is_aligned:
+                                return child_str
+                            try:
+                                elem = ET.fromstring(child_str) if isinstance(child_str, str) else child_str
+                                attr_val = elem.attrib.get("attribute")
+                                if attr_val:
+                                    role_map = {
+                                        "leftSideTexture": "rightSideTexture",
+                                        "rightSideTexture": "leftSideTexture",
+                                        "leftSideBaseboard": "rightSideBaseboard",
+                                        "rightSideBaseboard": "leftSideBaseboard",
+                                        "leftSideShininess": "rightSideShininess",
+                                        "rightSideShininess": "leftSideShininess",
+                                        "leftSideColor": "rightSideColor",
+                                        "rightSideColor": "leftSideColor",
+                                    }
+                                    if attr_val in role_map:
+                                        elem.attrib["attribute"] = role_map[attr_val]
+                                        return ET.tostring(elem, encoding="unicode")
+                            except Exception:
+                                pass
+                            return child_str
+
                         def _extract_prop_name_val(child_str):
                             try:
                                 elem = ET.fromstring(child_str) if isinstance(child_str, str) else child_str
@@ -653,7 +663,8 @@ class HomeModel:
                                 prop_map[info[0]] = info[1]
 
                         for child in other.extra_children:
-                            info = _extract_prop_name_val(child)
+                            norm_child = _normalize_child_xml(child, aligned)
+                            info = _extract_prop_name_val(norm_child)
                             if info:
                                 p_name, p_val = info
                                 if p_name in prop_map:
@@ -662,10 +673,10 @@ class HomeModel:
                                     # identical value coalesces, do not duplicate
                                 else:
                                     prop_map[p_name] = p_val
-                                    merged_children.append(child)
+                                    merged_children.append(norm_child)
                             else:
-                                if child not in merged_children:
-                                    merged_children.append(child)
+                                if norm_child not in merged_children:
+                                    merged_children.append(norm_child)
 
                     # Orient atom to match base source wall direction
                     atom_dx, atom_dy = p2[0] - p1[0], p2[1] - p1[1]
@@ -1363,6 +1374,40 @@ class HomeModel:
                         warnings.append(msg)
                         findings.append({"code": "DOOR_SWEEP_COLLISION", "severity": "warning", "entity_ids": [op.id, f.id], "message": msg})
 
+                # PAC-1 C08, R17-P1-06: Check door swing sector against obstacle wall material
+                for other_w in self.walls.values():
+                    if other_w.id == op.wall_id:
+                        continue  # Host wall is exempted
+                    other_lvl = other_w.level_id or "level1"
+                    if other_lvl != lvl:
+                        continue
+                    w_elev = 0.0
+                    w_lvl_obj = self.get_level(other_lvl)
+                    if w_lvl_obj:
+                        w_elev = w_lvl_obj.elevation_cm
+                    if w_elev >= op.elevation_cm + op.height_cm or w_elev + other_w.height <= op.elevation_cm:
+                        continue
+                    L = other_w.length
+                    if L < 1e-4:
+                        continue
+                    nx = -(other_w.y_end - other_w.y_start) / L * (other_w.thickness / 2.0)
+                    ny = (other_w.x_end - other_w.x_start) / L * (other_w.thickness / 2.0)
+                    w_corners = [
+                        (other_w.x_start + nx, other_w.y_start + ny),
+                        (other_w.x_end + nx, other_w.y_end + ny),
+                        (other_w.x_end - nx, other_w.y_end - ny),
+                        (other_w.x_start - nx, other_w.y_start - ny)
+                    ]
+                    if _door_sector_intersects_polygon(hinge, p_latch, p_open, w_corners, tol=0.1):
+                        msg = f"Door '{op.id}' swing sector collides with wall '{other_w.id}'."
+                        warnings.append(msg)
+                        findings.append({
+                            "code": "DOOR_WALL_COLLISION",
+                            "severity": "warning",
+                            "entity_ids": [op.id, other_w.id],
+                            "message": msg
+                        })
+
         # Gate C03 & C04: Check furniture vs physical wall material (accounting for opening cutouts)
         try:
             from shapely.geometry import Polygon, LineString
@@ -1565,6 +1610,23 @@ class HomeModel:
         root_attribs.update(self.extra_root_attribs)
         root = ET.Element("home", **root_attribs)
         
+        # PAC-1 N02, R17-P1-03: Root property, environment, camera elements belong BEFORE levels in native Sweet Home 3D DTD
+        PRE_LEVEL_TAGS = {"property", "environment", "camera", "observer"}
+        pre_elements = []
+        post_elements = []
+        for raw_elem_str in self.extra_elements:
+            try:
+                el = ET.fromstring(raw_elem_str)
+                if el.tag in PRE_LEVEL_TAGS:
+                    pre_elements.append(el)
+                else:
+                    post_elements.append(raw_elem_str)
+            except Exception:
+                post_elements.append(raw_elem_str)
+
+        for el in pre_elements:
+            root.append(el)
+
         # Levels (floorThickness preserved from source or default 12.0)
         for lvl in self.levels:
             lvl_attrib = {
@@ -1587,7 +1649,6 @@ class HomeModel:
             op_attrib = {
                 "id": op.id, "name": op.name,
                 "width": str(op.width_cm), "height": str(op.height_cm),
-                "type": op.opening_type, "swing": op.swing,
                 "elevation": str(op.elevation_cm),
             }
             if wall:
@@ -1597,8 +1658,6 @@ class HomeModel:
                 out_y = op.y_cm if op.y_cm is not None else p_center[1]
                 out_angle = math.radians(op.angle_deg) if op.angle_deg is not None else math.radians(wall.angle_deg)
                 op_attrib.update({
-                    "wall": op.wall_id,
-                    "offset": str(op.offset_cm),
                     "x": str(round(out_x, 2)),
                     "y": str(round(out_y, 2)),
                     "depth": str(depth_val),
@@ -1606,9 +1665,6 @@ class HomeModel:
                     "level": op.level_id or wall.level_id,
                 })
             else:
-                if op.wall_id:
-                    op_attrib["wall"] = op.wall_id
-                    op_attrib["offset"] = str(op.offset_cm)
                 if op.x_cm is not None:
                     op_attrib["x"] = str(round(op.x_cm, 2))
                 if op.y_cm is not None:
@@ -1619,8 +1675,21 @@ class HomeModel:
                     op_attrib["angle"] = str(math.radians(op.angle_deg))
                 if op.level_id:
                     op_attrib["level"] = op.level_id
-            op_attrib.update(op.extra_attribs)
+
+            # PAC-1 N02, R17-P1-03: Strip non-native wire attributes ('wall', 'offset', 'type', 'swing')
+            for k, v in op.extra_attribs.items():
+                if k not in ("wall", "offset", "type", "swing"):
+                    op_attrib[k] = v
             op_elem = ET.SubElement(root, "doorOrWindow", **op_attrib)
+
+            # Native sash child for door swing
+            has_sash = any("<sash" in c for c in op.extra_children)
+            if not has_sash and op.swing in ("left", "right"):
+                if op.swing == "right":
+                    ET.SubElement(op_elem, "sash", xAxis="0.0", yAxis="0.5", width="1.0", startAngle="0.0", endAngle=str(-math.pi / 2))
+                elif op.swing == "left":
+                    ET.SubElement(op_elem, "sash", xAxis="1.0", yAxis="0.5", width="1.0", startAngle=str(math.pi), endAngle=str(3 * math.pi / 2))
+
             for raw_child in op.extra_children:
                 try:
                     op_elem.append(ET.fromstring(raw_child))
@@ -1697,10 +1766,13 @@ class HomeModel:
                 except Exception:
                     pass
 
-        # Preserve unmodeled extra elements (cameras, observers, background images, etc.)
-        for raw_elem_str in self.extra_elements:
+        # Preserve unmodeled trailing extra elements
+        for el in post_elements:
             try:
-                root.append(ET.fromstring(raw_elem_str))
+                if isinstance(el, str):
+                    root.append(ET.fromstring(el))
+                else:
+                    root.append(el)
             except Exception:
                 pass
 
@@ -1917,11 +1989,16 @@ class HomeModel:
                 extra_children=extra_children,
             )
 
-        # Dimensions
+        # Dimensions (PAC-1 N02, R17-P1-03: support elevationStart / elevationEnd)
         for elem in root.findall("dimensionLine"):
-            known_dim_keys = {"id", "level", "xStart", "yStart", "xEnd", "yEnd", "offset", "elevation"}
+            known_dim_keys = {"id", "level", "xStart", "yStart", "xEnd", "yEnd", "offset", "elevation", "elevationStart", "elevationEnd"}
             extra_attribs = {k: v for k, v in elem.attrib.items() if k not in known_dim_keys}
             extra_children = [ET.tostring(c, encoding="unicode") for c in elem]
+            elev_val = 0.0
+            if "elevationStart" in elem.attrib:
+                elev_val = float(elem.attrib["elevationStart"])
+            elif "elevation" in elem.attrib:
+                elev_val = float(elem.attrib["elevation"])
             model.add_dimension(
                 dimension_id=elem.attrib.get("id"),
                 x_start=float(elem.attrib.get("xStart", 0.0)),
@@ -1930,7 +2007,7 @@ class HomeModel:
                 y_end=float(elem.attrib.get("yEnd", 0.0)),
                 offset_cm=float(elem.attrib.get("offset", 30.0)),
                 level_id=elem.attrib.get("level", "level1"),
-                elevation_cm=float(elem.attrib.get("elevation", 0.0)),
+                elevation_cm=elev_val,
                 extra_attribs=extra_attribs,
                 extra_children=extra_children,
             )

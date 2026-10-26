@@ -2,11 +2,15 @@ class Room:
     """Represents an enclosed architectural room polygon in Sweet Home 3D."""
 
     def __init__(self, room_id, name, points, level_id="level1", floor_color="#E8E8E8", ceiling_color="#FFFFFF",
-                 extra_attribs=None, extra_children=None):
+                 extra_attribs=None, extra_children=None, holes=None):
         self.id = str(room_id)
         self.name = str(name)
         # points must be a list of (x, y) tuples/lists in cm
         self.points = [(float(p[0]), float(p[1])) for p in points]
+        self.holes = [
+            [(float(p[0]), float(p[1])) for p in h]
+            for h in holes
+        ] if holes else None
         self.level_id = str(level_id)
         self.floor_color = str(floor_color)
         self.ceiling_color = str(ceiling_color)
@@ -120,7 +124,7 @@ class Room:
         return clear_poly
 
     def to_dict(self):
-        return {
+        d = {
             "id": self.id,
             "name": self.name,
             "points": self.points,
@@ -132,6 +136,9 @@ class Room:
             "extra_attribs": self.extra_attribs,
             "extra_children": self.extra_children,
         }
+        if self.holes:
+            d["holes"] = self.holes
+        return d
 
     @classmethod
     def from_dict(cls, d):
@@ -144,4 +151,5 @@ class Room:
             ceiling_color=d.get("ceiling_color", "#FFFFFF"),
             extra_attribs=d.get("extra_attribs"),
             extra_children=d.get("extra_children"),
+            holes=d.get("holes"),
         )

@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.8.0 (PAC-1 Contract Iteration 17)  
+**Document Version:** 2.9.0 (PAC-1 Contract Iteration 18)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -158,8 +158,27 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
   - Excluded stale binary `Home` zip payload during saving. (`✅ Completed`)
 - [x] **R16-P1-04: Agent-Native Ergonomics Protocol Envelope (Gate A04)**:
   - Versioned JSON envelope (`protocol_version: "1"`, `status: "success"`, `outcome: "ok"`). (`✅ Completed`)
+
+### Phase 13: Sol Round 17 Prescriptions — Native Face Roles, Gap Preservation, Dimension Import, Strict S01 & Finite Envelope (PAC-1 Iteration 18)
+- [x] **R17-P1-01: Native Child Face Roles Reversal (Gates T04, T06, N09)**:
+  - Reversed wall sources dynamically swap child XML attributes (`leftSideTexture` ↔ `rightSideTexture`, `leftSideBaseboard` ↔ `rightSideBaseboard`). (`✅ Completed`)
+- [x] **R17-P1-02: Near-Full Circle Gap Preservation (Gates T05, T09, E08)**:
+  - Preserved exact endpoints and gaps on arcs spanning $\ge \pi$ without scale-dependent snapping, bounding added path to $\le 0.01$ cm. (`✅ Completed`)
+- [x] **R17-P1-03: Native Codec & Wire Sequence Completeness (Gates N02, N03, N07, N09, E07)**:
+  - Emitted native `<sash>` child elements for door leaves; stripped non-native attributes (`wall`, `offset`, `type`, `swing`).
+  - Imported native dimension elevations (`elevationStart`, `elevationEnd`).
+  - Ordered preserved root categories: `<property>` and `<environment>` precede `<level>`. (`✅ Completed`)
+- [x] **R17-P1-04: Complete Versioned JSON Envelope & Finite Enforcement (Gates A04, A07)**:
+  - Versioned structured error envelopes across all error exit paths.
+  - Disallowed non-finite constants (`NaN`, `Inf`) in JSON output, safely falling back to structured rejection. (`✅ Completed`)
+- [x] **R17-P1-05: Strict Journal Revision Step (Gate S01)**:
+  - Enforced `target_revision == expected_revision + 1` in journal schema validation, rejecting revision jumps. (`✅ Completed`)
+- [x] **R17-P1-06: Door Sweep Obstacle Wall Material Collision (Gate C08)**:
+  - Detected wall solid intersections with door swing sectors and emitted `DOOR_WALL_COLLISION`. (`✅ Completed`)
+- [x] **R17-P1-07: Room Hole Geometry Preservation (Gates T07, C05, E03)**:
+  - Supported internal room holes in `Room` data model and model serialization, preventing silent geometry loss. (`✅ Completed`)
 - [x] **Reconciled Test Suite**:
-  - 123 tests passing in 7.68s (119 core + 4 E2E). (`✅ Completed`)
+  - **133 total tests passing in 5.14s** (129 core + 4 E2E; all 10 Round 17 oracles green). (`✅ Completed`)
 
 
 

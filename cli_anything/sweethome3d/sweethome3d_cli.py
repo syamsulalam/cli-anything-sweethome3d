@@ -157,10 +157,10 @@ def safe_publish_export(output_path, generator_fn):
 
 
 def output_result(ctx, data, human_formatter=None):
-    """Outputs data either as JSON or human-readable format based on context flag (PAC-1 A04)."""
+    """Outputs data either as JSON or human-readable format based on context flag (PAC-1 A04, R16-P1-04, R17-P1-04)."""
     is_json = ctx.obj.get("json", False) if ctx.obj else False
     if is_json:
-        # PAC-1 A04, R16-P1-04: Versioned finite JSON envelope
+        # PAC-1 A04, R16-P1-04, R17-P1-04: Versioned finite JSON envelope
         payload = {
             "protocol_version": "1",
             "status": "success",
@@ -173,7 +173,11 @@ def output_result(ctx, data, human_formatter=None):
             "data": data,
             "error": None
         }
-        click.echo(json.dumps(payload, indent=2))
+        try:
+            serialized = json.dumps(payload, indent=2, allow_nan=False)
+            click.echo(serialized)
+        except (ValueError, TypeError) as e:
+            output_error(ctx, f"Non-finite numeric value in output: {e}", code=3, error_code="NON_FINITE_NUMERIC_ERROR")
     elif human_formatter:
         human_formatter(data)
     elif isinstance(data, (dict, list)):
@@ -181,10 +185,27 @@ def output_result(ctx, data, human_formatter=None):
     else:
         skin.success(str(data))
 
-def output_error(ctx, message, code=1):
+def output_error(ctx, message, code=1, error_code=None):
+    """Outputs structured error either as JSON or human-readable format (PAC-1 A04, R17-P1-04)."""
     is_json = ctx.obj.get("json", False) if ctx.obj else False
     if is_json:
-        click.echo(json.dumps({"status": "error", "message": str(message)}, indent=2))
+        payload = {
+            "protocol_version": "1",
+            "status": "error",
+            "outcome": "error",
+            "project": {
+                "name": session_mgr.model.name if session_mgr.model else None,
+                "active_file": session_mgr.active_file,
+                "revision": getattr(session_mgr, "revision", 0),
+            },
+            "data": None,
+            "error": {
+                "code": error_code or "ERROR",
+                "message": str(message)
+            },
+            "message": str(message)
+        }
+        click.echo(json.dumps(payload, indent=2))
     else:
         skin.error(str(message))
     sys.exit(code)

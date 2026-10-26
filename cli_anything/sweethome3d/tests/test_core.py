@@ -2422,6 +2422,149 @@ def test_sh3d_save_stale_alternate_binary_home_excluded(tmp_path):
         assert "Home" not in names, "Stale binary 'Home' entry must NOT be written when saving updated Home.xml"
 
 
+# ==============================================================================
+# Round 17 Acceptance Oracles (PAC-1 Iteration 17)
+# ==============================================================================
+
+def test_native_child_face_roles_reverse_with_source():
+    """PAC-1 T04, T06, N09, R17-P1-01: Native child attributes (texture/baseboard) reverse with source wall."""
+    m = HomeModel()
+    m.add_wall('a', 0, 0, 300, 0)
+    m.add_wall('b', 300, 0, 0, 0, extra_children=[
+        '<texture attribute="leftSideTexture" name="wood" image="wood.png" width="50" height="50"/>',
+        '<baseboard attribute="leftSideBaseboard" thickness="1" height="8"/>'
+    ])
+    m.node_walls()
+    children = [ET.fromstring(c) for c in next(iter(m.walls.values())).extra_children]
+    assert {c.get('attribute') for c in children} == {'rightSideTexture', 'rightSideBaseboard'}
+
+
+def test_near_full_circle_does_not_close_a_real_gap():
+    """PAC-1 T05, T09, E08, R17-P1-02: Near-full circular arc does not close a real gap beyond 0.01cm budget."""
+    radius = 10000.0
+    sweep_deg = 359.999
+    theta = math.radians(sweep_deg)
+    m = HomeModel()
+    m.add_wall('almost', radius, 0, radius * math.cos(theta), -radius * math.sin(theta), arc_extent=sweep_deg)
+    assert m.validate()['valid']
+    atoms = m.get_noded_wall_segments()
+    represented_sweep = sum(abs(a['arc_extent']) for a in atoms)
+    added_path_cm = radius * math.radians(abs(represented_sweep - sweep_deg))
+    assert added_path_cm <= 0.01, (represented_sweep, added_path_cm)
+
+
+def test_generated_opening_uses_native_sash_and_properties():
+    """PAC-1 N02, N03, N07, R17-P1-03: Native sash child element emitted without custom attributes."""
+    m = HomeModel()
+    m.add_wall('host', 0, 0, 300, 0)
+    m.add_opening('d', 'Door', wall_id='host', offset_cm=50, width_cm=90, swing='right')
+    door = ET.fromstring(m.to_xml()).find('doorOrWindow')
+    assert not ({'wall', 'offset', 'type', 'swing'} & set(door.attrib))
+    sashes = door.findall('sash')
+    assert len(sashes) == 1
+    s = sashes[0]
+    assert float(s.get('xAxis')) == 0.0
+    assert float(s.get('yAxis')) == 0.5
+    assert float(s.get('width')) == 1.0
+    assert float(s.get('startAngle')) == 0.0
+    assert float(s.get('endAngle')) == pytest.approx(-math.pi / 2)
+
+
+def test_native_dimension_elevation_import():
+    """PAC-1 N02, R17-P1-03: Dimension line imports elevationStart / elevationEnd."""
+    xml = '''<home version="7400">
+      <level id="level1" name="Ground" elevation="0" floorThickness="12" height="280"/>
+      <dimensionLine id="d" level="level1" xStart="0" yStart="0" xEnd="100" yEnd="0"
+                     offset="30" elevationStart="27" elevationEnd="27"/>
+    </home>'''
+    m = HomeModel.from_xml(xml)
+    assert m.dimensions['d'].elevation_cm == 27.0
+
+
+def test_preserved_native_root_categories_are_ordered():
+    """PAC-1 N02, R17-P1-03: Preserved root elements (property, environment) precede level in XML."""
+    m = HomeModel()
+    m.add_wall('w', 0, 0, 300, 0)
+    m.extra_elements = ['<property name="example" value="keep"/>', '<environment groundColor="00FFFFFF"/>']
+    tags = [e.tag for e in ET.fromstring(m.to_xml())]
+    assert tags.index('property') < tags.index('level')
+    assert tags.index('environment') < tags.index('level')
+
+
+def test_error_envelope_is_versioned(tmp_path, monkeypatch):
+    """PAC-1 A04, R17-P1-04: Error output in JSON mode has protocol_version and structured error."""
+    from cli_anything.sweethome3d import sweethome3d_cli as cli_module
+    from click.testing import CliRunner
+    mgr = SessionManager(str(tmp_path / 'session.json'))
+    monkeypatch.setattr(cli_module, '_session_mgr', mgr)
+    result = CliRunner().invoke(cli_module.cli, ['--json', 'wall', 'remove', 'missing'])
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
+    assert payload.get('protocol_version') == '1'
+    assert isinstance(payload.get('error'), dict)
+    assert isinstance(payload['error'].get('code'), str)
+
+
+def test_nonfinite_result_emits_finite_structured_rejection(tmp_path, monkeypatch):
+    """PAC-1 A04, A07, R17-P1-04: Non-finite numeric output emits structured finite JSON error."""
+    import click
+    from cli_anything.sweethome3d import sweethome3d_cli as cli_module
+    from click.testing import CliRunner
+    mgr = SessionManager(str(tmp_path / 'session.json'))
+    monkeypatch.setattr(cli_module, '_session_mgr', mgr)
+    @click.command()
+    @click.pass_context
+    def emit(ctx):
+        ctx.obj = {'json': True}
+        cli_module.output_result(ctx, {'measurement': float('nan')})
+    result = CliRunner().invoke(emit)
+    assert result.exit_code != 0
+    def reject_constant(value):
+        raise ValueError(value)
+    payload = json.loads(result.output, parse_constant=reject_constant)
+    assert payload.get('protocol_version') == '1'
+    assert isinstance(payload.get('error'), dict)
+
+
+def test_journal_revision_must_advance_exactly_once(tmp_path):
+    """PAC-1 S01, R17-P1-05: Journal schema rejects revision jumps where target != expected + 1."""
+    import os
+    from cli_anything.sweethome3d.core.session import _validate_journal_schema
+    h = 'a' * 64
+    rec = dict(schema_version=1, tx_id='00000000-0000-4000-8000-000000000001',
+               session_path=os.path.normcase(os.path.abspath(tmp_path / 'session.json')),
+               project_id='00000000-0000-4000-8000-000000000002',
+               target=str(tmp_path / 'target.sh3d'), staged_session=str(tmp_path / 'staged.json'),
+               candidate_session_sha256=h, candidate_artifact_sha256=h,
+               base_session_sha256=h, expected_revision=1, target_revision=3,
+               had_target=False)
+    assert _validate_journal_schema(rec) is False
+
+
+def test_door_sweep_reports_wall_material_collision():
+    """PAC-1 C08, R17-P1-06: Door sweep sector collides with obstacle wall material."""
+    m = HomeModel()
+    m.add_wall('host', 0, 0, 300, 0)
+    m.add_opening('d', 'Door', wall_id='host', offset_cm=100, width_cm=90, swing='right')
+    m.add_wall('blocker', 110, 30, 180, 30, thickness=10)
+    codes = {f['code'] for f in m.validate()['findings']}
+    assert 'DOOR_WALL_COLLISION' in codes
+
+
+def test_json_room_hole_is_not_silently_filled():
+    """PAC-1 T07, C05, E03, R17-P1-07: Room holes are preserved in model dictionary without silent loss."""
+    hole = [[100.0, 100.0], [200.0, 100.0], [200.0, 200.0], [100.0, 200.0]]
+    source = {'name': 'Hole', 'rooms': [{'id': 'r', 'name': 'Room', 'level_id': 'level1',
+              'points': [[0, 0], [400, 0], [400, 400], [0, 400]], 'holes': [hole]}]}
+    try:
+        m = HomeModel.from_dict(source)
+    except ValueError as exc:
+        assert 'hole' in str(exc).lower()
+        return
+    result = json.loads(json.dumps(m.to_dict()))['rooms'][0]
+    assert result.get('holes') == [hole]
+
+
 
 
 
