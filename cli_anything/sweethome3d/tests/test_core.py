@@ -3,6 +3,7 @@ import math
 import tempfile
 import zipfile
 import json
+import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
@@ -1208,6 +1209,294 @@ def test_native_wire_v7400_colors_and_arc_radians():
     m_parsed = HomeModel.from_xml(xml)
     assert m_parsed.rooms["r1"].floor_color == "#EAEAEA"
     assert round(m_parsed.walls["w_arc"].arc_extent, 1) == 90.0
+
+def test_journal_schema_rejects_boolean_revisions():
+    """PAC-1 S01 & P0-01: Rejection of booleans as revisions."""
+    from cli_anything.sweethome3d.core.session import _validate_journal_schema
+    # isinstance(True, int) is True in Python; validator must strictly reject booleans
+    bad_rec = {
+        "schema_version": 1,
+        "tx_id": "test_tx",
+        "target": "target.sh3d",
+        "staged_session": "staged.json",
+        "expected_revision": False,
+        "target_revision": True,
+    }
+    assert _validate_journal_schema(bad_rec) is False
+    # Schema version missing or wrong must also be rejected
+    bad_schema = dict(bad_rec)
+    bad_schema["expected_revision"] = 0
+    bad_schema["target_revision"] = 1
+    bad_schema["schema_version"] = 2
+    assert _validate_journal_schema(bad_schema) is False
+
+def test_staged_session_tampering_rollback():
+    """PAC-1 S01, S05 & P0-01: Tampered staged session triggers rollback to base."""
+    from cli_anything.sweethome3d.core.session import _reconcile_pending, _calc_sha256
+    with tempfile.TemporaryDirectory() as td:
+        sess_file = os.path.join(td, "sess.json")
+        target_file = os.path.join(td, "home.sh3d")
+        stage_file = os.path.join(td, "stage.json")
+        bak_file = os.path.join(td, "base.bak")
+
+        # Initial base session at revision 1
+        with open(sess_file, "w", encoding="utf-8") as f:
+            json.dump({"revision": 1, "name": "Base"}, f)
+        with open(target_file, "w", encoding="utf-8") as f:
+            f.write("BASE_ARTIFACT")
+        shutil.copy2(target_file, bak_file)
+
+        # Stage file at revision 2
+        with open(stage_file, "w", encoding="utf-8") as f:
+            json.dump({"revision": 2, "name": "Candidate"}, f)
+        original_stage_sha = _calc_sha256(stage_file)
+
+        # Journal records candidate hashes
+        journal_file = sess_file + ".pending"
+        journal_rec = {
+            "schema_version": 1,
+            "tx_id": "tx_tamper",
+            "target": target_file,
+            "tmp_target": target_file + ".tmp",
+            "candidate_artifact_sha256": "fake_sha",
+            "candidate_session_sha256": original_stage_sha,
+            "base_artifact_sha256": _calc_sha256(bak_file),
+            "backup": bak_file,
+            "had_target": True,
+            "staged_session": stage_file,
+            "expected_revision": 1,
+            "target_revision": 2,
+        }
+        with open(journal_file, "w", encoding="utf-8") as f:
+            json.dump(journal_rec, f)
+
+        # TAMPER: alter staged session content
+        with open(stage_file, "w", encoding="utf-8") as f:
+            json.dump({"revision": 2, "name": "TAMPERED_INJECTION"}, f)
+
+        # Reconcile should detect tampered stage hash mismatch and rollback to base!
+        _reconcile_pending(sess_file)
+
+        with open(sess_file, "r", encoding="utf-8") as f:
+            d = json.load(f)
+            assert d["name"] == "Base"
+            assert d["revision"] == 1
+
+def test_stale_journal_fails_closed():
+    """PAC-1 S04 & P0-01: Journal targeting revision 4 does not rewind disk revision 10."""
+    from cli_anything.sweethome3d.core.session import _reconcile_pending
+    with tempfile.TemporaryDirectory() as td:
+        sess_file = os.path.join(td, "sess.json")
+        journal_file = sess_file + ".pending"
+        stage_file = os.path.join(td, "stage.json")
+
+        # Disk session is already at revision 10
+        with open(sess_file, "w", encoding="utf-8") as f:
+            json.dump({"revision": 10, "name": "AuthoritativeNewer"}, f)
+
+        with open(stage_file, "w", encoding="utf-8") as f:
+            json.dump({"revision": 4, "name": "StaleCandidate"}, f)
+
+        journal_rec = {
+            "schema_version": 1,
+            "tx_id": "tx_stale",
+            "target": os.path.join(td, "home.sh3d"),
+            "tmp_target": os.path.join(td, "home.sh3d.tmp"),
+            "candidate_artifact_sha256": "art_sha",
+            "candidate_session_sha256": "sess_sha",
+            "base_artifact_sha256": "base_sha",
+            "backup": None,
+            "had_target": False,
+            "staged_session": stage_file,
+            "expected_revision": 3,
+            "target_revision": 4,
+        }
+        with open(journal_file, "w", encoding="utf-8") as f:
+            json.dump(journal_rec, f)
+
+        _reconcile_pending(sess_file)
+
+        # Authoritative newer session must NOT be rewound
+        with open(sess_file, "r", encoding="utf-8") as f:
+            d = json.load(f)
+            assert d["revision"] == 10
+            assert d["name"] == "AuthoritativeNewer"
+        # Pending journal must be preserved for inspection
+        assert os.path.exists(journal_file)
+
+def test_rollback_preserves_evidence_when_base_unprovable():
+    """PAC-1 S05 & P0-02: Stage and backup evidence are preserved if rollback fails closed."""
+    from cli_anything.sweethome3d.core.session import _rollback_to_base
+    with tempfile.TemporaryDirectory() as td:
+        target = os.path.join(td, "target.sh3d")
+        backup = os.path.join(td, "target.bak")
+        stage = os.path.join(td, "stage.json")
+        tmp_target = os.path.join(td, "target.tmp")
+
+        with open(target, "w") as f: f.write("DAMAGED_TARGET")
+        with open(backup, "w") as f: f.write("CORRUPTED_BACKUP")
+        with open(stage, "w") as f: f.write("CANDIDATE_STAGE")
+        with open(tmp_target, "w") as f: f.write("TMP_TARGET")
+
+        rec = {
+            "schema_version": 1,
+            "tx_id": "tx_fail",
+            "target": target,
+            "tmp_target": tmp_target,
+            "staged_session": stage,
+            "backup": backup,
+            "had_target": True,
+            "base_artifact_sha256": "expected_valid_base_sha",
+            "expected_revision": 1,
+            "target_revision": 2,
+        }
+        # Rollback must return False because base cannot be proven
+        res = _rollback_to_base(rec)
+        assert res is False
+        # ALL evidence files must be preserved byte-for-byte!
+        assert os.path.exists(stage)
+        assert os.path.exists(tmp_target)
+        assert os.path.exists(backup)
+        assert os.path.exists(target)
+
+def test_assert_safe_export_target_protects_journal_and_session():
+    """PAC-1 S06 & P0-03: Export cannot overwrite session, lock, pending journal, or recovery targets."""
+    from cli_anything.sweethome3d.sweethome3d_cli import assert_safe_export_target, get_session_mgr
+    mgr = get_session_mgr()
+    sess_path = mgr.session_path
+
+    import pytest
+    with pytest.raises(RuntimeError, match="guarded by active transaction journal"):
+        assert_safe_export_target(sess_path)
+    with pytest.raises(RuntimeError, match="guarded by active transaction journal"):
+        assert_safe_export_target(sess_path + ".pending")
+    with pytest.raises(RuntimeError, match="guarded by active transaction journal"):
+        assert_safe_export_target(sess_path + ".lock")
+
+def test_non_finite_parameter_in_validate_does_not_crash_geos():
+    """PAC-1 C01 & P1-04: Non-finite parameters emit errors and do not crash GEOS with unclosed linestrings."""
+    model = HomeModel("Non-finite test")
+    model.add_furniture("f_nan", "Table", x_cm=float("nan"), y_cm=200.0, angle_deg=float("inf"))
+    model.add_wall("w_inf", 0, 0, float("nan"), 0)
+    val = model.validate()
+    assert val["valid"] is False
+    codes = [f["code"] for f in val["findings"]]
+    assert "NON_FINITE_COORDINATE" in codes
+
+def test_window_sill_height_material_collision():
+    """PAC-1 C03 & P1-03: Furniture below window sill collides with solid wall material underneath."""
+    model = HomeModel("Window Sill Test")
+    # Straight 20cm wall along X axis from (0,0) to (500,0)
+    model.add_wall("w1", 0, 0, 500, 0, thickness=20.0, height=280.0)
+    # Window at sill 50cm, height 50cm (Z: 50..100cm)
+    model.add_opening("win1", "Window", wall_id="w1", offset_cm=200.0, width_cm=100.0, height_cm=50.0,
+                      opening_type="window", elevation_cm=50.0)
+    # Low furniture centered at wall, height 75cm (Z: 0..75cm)
+    # Intersects solid wall in Z: 0..50cm (below sill)!
+    model.add_furniture("f_low", "Low Unit", x_cm=250.0, y_cm=0.0, width_cm=80.0, depth_cm=80.0, height_cm=75.0, elevation_cm=0.0)
+    val = model.validate()
+    assert any(f["code"] == "FURNITURE_WALL_COLLISION" for f in val["findings"])
+
+def test_curved_wall_furniture_collision():
+    """PAC-1 C03 & P1-03: Curved wall polygon collides with furniture centered along arc."""
+    model = HomeModel("Curved Collision Test")
+    # 90° curved wall (0,0) -> (400,0) thickness 20cm; arc midpoint is at (200, ~82.8)
+    model.add_wall("w_curve", 0, 0, 400, 0, thickness=20.0, arc_extent=90.0)
+    # Furniture placed at arc midpoint
+    model.add_furniture("f_mid", "Table", x_cm=200.0, y_cm=82.84, width_cm=80.0, depth_cm=80.0, height_cm=75.0)
+    val = model.validate()
+    assert any(f["code"] == "FURNITURE_WALL_COLLISION" for f in val["findings"])
+
+def test_dynamic_wall_thickness_and_net_masonry_volume():
+    """PAC-1 T07, T08 & P1-02: Dynamic wall thickness determines clear core; net masonry volume is computed."""
+    # 3x3m room with 10cm walls -> clear core = (3 - 0.10)^2 = 8.410 m²
+    m10 = HomeModel("10cm walls")
+    m10.add_room("r1", "Room", [(0,0), (300,0), (300,300), (0,300)], with_walls=True, wall_thickness=10.0)
+    t10 = m10.takeoff()
+    assert round(t10["summary"]["clear_core_area_m2"], 3) == 8.410
+
+    # 3x3m room with 30cm walls -> clear core = (3 - 0.30)^2 = 7.290 m²
+    m30 = HomeModel("30cm walls")
+    m30.add_room("r1", "Room", [(0,0), (300,0), (300,300), (0,300)], with_walls=True, wall_thickness=30.0)
+    t30 = m30.takeoff()
+    assert round(t30["summary"]["clear_core_area_m2"], 3) == 7.290
+
+    # 3x3m room with no walls -> clear core = reference area = 9.000 m²
+    m0 = HomeModel("no walls")
+    m0.add_room("r1", "Room", [(0,0), (300,0), (300,300), (0,300)])
+    t0 = m0.takeoff()
+    assert round(t0["summary"]["clear_core_area_m2"], 3) == 9.000
+
+    # PAC-1 Section 6.4 Golden Fixture: Two adjacent 3x3m rooms, 7 walls of 0.15m, 1x2.1m door
+    golden = HomeModel("Golden Fixture")
+    golden.add_room("r1", "Room 1", [(0, 0), (300, 0), (300, 300), (0, 300)], with_walls=True, wall_thickness=15.0)
+    golden.add_room("r2", "Room 2", [(300, 0), (600, 0), (600, 300), (300, 300)], with_walls=True, wall_thickness=15.0)
+    # Find shared wall at x=300
+    shared_w = None
+    for w in golden.walls.values():
+        if abs(w.x_start - 300.0) < 1.0 and abs(w.x_end - 300.0) < 1.0:
+            shared_w = w
+            break
+    assert shared_w is not None
+    golden.add_opening("d1", "Door", wall_id=shared_w.id, offset_cm=50.0, width_cm=100.0, height_cm=210.0, opening_type="door", elevation_cm=0.0)
+    t_gold = golden.takeoff()
+    assert t_gold["summary"]["net_masonry_volume_m3"] == 8.442
+    assert t_gold["summary"]["clear_core_area_m2"] == 16.245
+    assert t_gold["summary"]["reference_skirting_length_m"] == 22.0
+    assert t_gold["summary"]["clear_face_skirting_length_m"] == 20.8
+
+def test_elevated_door_leaves_skirting_intact():
+    """PAC-1 T08 & P1-02: Opening elevated above baseboard zone (>= 10cm) leaves skirting fully intact."""
+    golden = HomeModel("Elevated Opening")
+    golden.add_room("r1", "Room 1", [(0, 0), (300, 0), (300, 300), (0, 300)], with_walls=True, wall_thickness=15.0)
+    golden.add_room("r2", "Room 2", [(300, 0), (600, 0), (600, 300), (300, 300)], with_walls=True, wall_thickness=15.0)
+    shared_w = None
+    for w in golden.walls.values():
+        if abs(w.x_start - 300.0) < 1.0 and abs(w.x_end - 300.0) < 1.0:
+            shared_w = w
+            break
+    # Elevated door/window at sill 100cm, height 100cm
+    golden.add_opening("d_elev", "Elevated Door", wall_id=shared_w.id, offset_cm=50.0, width_cm=100.0, height_cm=100.0,
+                       opening_type="door", elevation_cm=100.0)
+    t = golden.takeoff()
+    # Reference skirting remains fully 24m (0m deduction)
+    assert t["summary"]["reference_skirting_length_m"] == 24.0
+
+def test_export_level_scoping_svg_html_dxf():
+    """PAC-1 E01, E07 & P1-08: Level filtering scopes SVG title, HTML stats, and DXF drawing entities."""
+    from cli_anything.sweethome3d.core import export_svg, export_html, export_dxf
+    m = HomeModel("Multi-Level Project")
+    lvl1 = m.get_level("level1")
+    lvl2 = m.add_level("level2", "Second Floor", elevation_cm=300.0, height_cm=280.0)
+    m.add_room("r_gnd", "Ground Room", [(0,0), (300,0), (300,300), (0,300)], level_id="level1") # 9 m²
+    m.add_room("r_up", "Upper Room", [(0,0), (400,0), (400,400), (0,400)], level_id="level2") # 16 m²
+    m.add_wall("w_curve", 0, 0, 400, 0, arc_extent=90.0, level_id="level1")
+    m.add_furniture("chair", "Chair", x_cm=150, y_cm=150, level_id="level1")
+
+    with tempfile.TemporaryDirectory() as td:
+        svg_path = os.path.join(td, "gnd.svg")
+        export_svg(m, svg_path, level_id="level1")
+        with open(svg_path, "r", encoding="utf-8") as f:
+            svg_content = f.read()
+            assert "Total Area: 9.00 m²" in svg_content
+            assert "Total Area: 25.00 m²" not in svg_content
+
+        html_path = os.path.join(td, "gnd.html")
+        export_html(m, html_path, level_id="level1")
+        with open(html_path, "r", encoding="utf-8") as f:
+            html_content = f.read()
+            assert "9.00 m²" in html_content
+            assert "25.00 m²" not in html_content
+
+        dxf_path = os.path.join(td, "gnd.dxf")
+        export_dxf(m, dxf_path, level_id="level1")
+        with open(dxf_path, "r", encoding="utf-8") as f:
+            dxf_content = f.read()
+            # DXF must contain curved wall polyline and furniture footprint polyline
+            assert "WALLS" in dxf_content
+            assert "FURNITURE" in dxf_content
+            assert "POLYLINE" in dxf_content
+
 
 
 

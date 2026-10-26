@@ -16,8 +16,53 @@ from cli_anything.sweethome3d.core import (
 from cli_anything.sweethome3d.utils.repl_skin import ReplSkin
 from cli_anything.sweethome3d.utils.sweethome3d_backend import find_sweethome3d, launch_gui, get_install_instructions
 
-session_mgr = SessionManager()
+_session_mgr = None
+
+def get_session_mgr():
+    global _session_mgr
+    if _session_mgr is None:
+        _session_mgr = SessionManager()
+    return _session_mgr
+
+class _LazySessionManagerProxy:
+    def __getattr__(self, name):
+        return getattr(get_session_mgr(), name)
+    def __setattr__(self, name, value):
+        if name in ("_session_mgr",):
+            super().__setattr__(name, value)
+        else:
+            setattr(get_session_mgr(), name, value)
+
+session_mgr = _LazySessionManagerProxy()
 skin = ReplSkin("sweethome3d", version="1.2.0")
+
+def assert_safe_export_target(output_path):
+    """Guards against overwriting active session, journal, lock, or recovery targets (PAC-1 S06/P0-03)."""
+    target = os.path.normcase(os.path.abspath(output_path))
+    mgr = get_session_mgr()
+    sess_path = os.path.normcase(os.path.abspath(mgr.session_path))
+    protected = {sess_path, sess_path + ".pending", sess_path + ".lock"}
+    
+    if mgr.active_file:
+        protected.add(os.path.normcase(os.path.abspath(mgr.active_file)))
+
+    pending_file = mgr.session_path + ".pending"
+    if os.path.exists(pending_file):
+        try:
+            with open(pending_file, "r", encoding="utf-8") as pf:
+                rec = json.load(pf)
+                if isinstance(rec, dict):
+                    for k in ("target", "backup", "tmp_target", "staged_session"):
+                        v = rec.get(k)
+                        if v:
+                            protected.add(os.path.normcase(os.path.abspath(v)))
+        except Exception:
+            pass
+
+    if target in protected:
+        raise RuntimeError(
+            f"Cannot export to protected recovery target '{output_path}': destination is guarded by active transaction journal."
+        )
 
 def output_result(ctx, data, human_formatter=None):
     """Outputs data either as JSON or human-readable format based on context flag."""
@@ -469,8 +514,9 @@ def furniture_catalog(ctx):
 @click.option("--height", default=None, type=float, help="Height in cm.")
 @click.option("--angle", default=0.0, type=float, help="Rotation angle in degrees [0, 360).")
 @click.option("--level", "level_id", default=None, help="Target level ID.")
+@click.option("--room", "room_id", default=None, help="Assigned room ID for containment validation.")
 @click.pass_context
-def furniture_add(ctx, furniture_id, name, catalog_id, x, y, elevation, width, depth, height, angle, level_id):
+def furniture_add(ctx, furniture_id, name, catalog_id, x, y, elevation, width, depth, height, angle, level_id, room_id):
     """Add a piece of furniture."""
     target_lvl = level_id or session_mgr.current_level_id
     cat_entry = FURNITURE_CATALOG.get(catalog_id, {})
@@ -482,7 +528,9 @@ def furniture_add(ctx, furniture_id, name, catalog_id, x, y, elevation, width, d
     try:
         with session_mgr.transaction():
             session_mgr.push_state()
-            f = session_mgr.model.add_furniture(furniture_id, item_name, catalog_id, x, y, elevation, w, d, h, angle, target_lvl)
+            f = session_mgr.model.add_furniture(
+                furniture_id, item_name, catalog_id, x, y, elevation, w, d, h, angle, target_lvl, room_id=room_id
+            )
             session_mgr.save_session()
         output_result(ctx, f.to_dict())
     except Exception as e:
@@ -657,6 +705,7 @@ def export():
 def export_svg_cmd(ctx, output, level_id):
     """Export layered architectural vector SVG."""
     try:
+        assert_safe_export_target(output)
         out_path = export_svg(session_mgr.model, output, level_id=level_id)
         output_result(ctx, {"exported": out_path, "format": "svg", "level": level_id or "all"})
     except Exception as e:
@@ -669,6 +718,7 @@ def export_svg_cmd(ctx, output, level_id):
 def export_dxf_cmd(ctx, output, level_id):
     """Export AutoCAD-compatible DXF R12 file."""
     try:
+        assert_safe_export_target(output)
         out_path = export_dxf(session_mgr.model, output, level_id=level_id)
         output_result(ctx, {"exported": out_path, "format": "dxf", "level": level_id or "all"})
     except Exception as e:
@@ -681,6 +731,7 @@ def export_dxf_cmd(ctx, output, level_id):
 def export_html_cmd(ctx, output, level_id):
     """Export interactive self-contained HTML floor plan viewer."""
     try:
+        assert_safe_export_target(output)
         out_path = export_html(session_mgr.model, output, level_id=level_id)
         output_result(ctx, {"exported": out_path, "format": "html", "level": level_id or "all"})
     except Exception as e:
@@ -692,6 +743,7 @@ def export_html_cmd(ctx, output, level_id):
 def export_sh3d_cmd(ctx, output):
     """Export Sweet Home 3D native compressed ZIP archive (.sh3d)."""
     try:
+        assert_safe_export_target(output)
         out_path = session_mgr.model.save_sh3d(output)
         output_result(ctx, {"exported": out_path, "format": "sh3d"})
     except Exception as e:
@@ -704,6 +756,7 @@ def export_sh3d_cmd(ctx, output):
 def export_json_cmd(ctx, output, level_id):
     """Export structured JSON floor plan model."""
     try:
+        assert_safe_export_target(output)
         out_path = export_json(session_mgr.model, output, level_id=level_id)
         output_result(ctx, {"exported": out_path, "format": "json", "level": level_id or "all"})
     except Exception as e:

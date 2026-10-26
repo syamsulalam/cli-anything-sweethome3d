@@ -27,6 +27,7 @@ setup(
     python_requires=">=3.10",
     install_requires=[
         "click>=8.0",
+        "shapely>=2.0.0",
     ],
     entry_points={
         "console_scripts": [

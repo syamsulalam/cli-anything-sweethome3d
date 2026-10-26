@@ -281,8 +281,11 @@ class HomeModel:
         furn_catalog_counts = Counter(f.catalog_id for f in self.furniture.values())
 
         # Gate T08 / Section 6.4: Door deduction for skirting accounts for faces (interior shared wall = 2 faces, exterior = 1 face)
+        # Elevated openings with sill >= 10.0 cm do NOT break the baseboard profile (deduction = 0)
         def _get_door_faces(op):
             if op.opening_type != "door":
+                return 0
+            if op.elevation_cm >= 10.0:
                 return 0
             if not op.wall_id or op.wall_id not in self.walls:
                 return 1
@@ -303,20 +306,54 @@ class HomeModel:
                         break
             return max(1, faces)
 
-        doors_deduction_m = sum((op.width_cm / 100.0) * _get_door_faces(op) for op in self.openings.values() if op.opening_type == "door")
+        doors_deduction_m = sum(
+            (op.width_cm / 100.0) * _get_door_faces(op)
+            for op in self.openings.values()
+            if op.opening_type == "door" and op.elevation_cm < 10.0
+        )
         skirting_net_m = round(max(0.0, total_skirting_m - doors_deduction_m), 2)
 
-        # Clear core area & clear face skirting (deducting wall thickness 15cm from bounds)
+        # Clear core area & clear face skirting (determining wall thickness dynamically from incident walls)
         clear_core_area_m2 = 0.0
         clear_face_skirting_gross_m = 0.0
+
         for r in self.rooms.values():
             pts = r.points
+            is_rect = False
+            t_m = 0.0
             if len(pts) == 4:
-                l1 = math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]) / 100.0
-                l2 = math.hypot(pts[2][0] - pts[1][0], pts[2][1] - pts[1][1]) / 100.0
-                t_m = 0.15
-                c1 = max(0.0, l1 - t_m)
-                c2 = max(0.0, l2 - t_m)
+                l1 = math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])
+                l2 = math.hypot(pts[2][0] - pts[1][0], pts[2][1] - pts[1][1])
+                l3 = math.hypot(pts[3][0] - pts[2][0], pts[3][1] - pts[2][1])
+                l4 = math.hypot(pts[0][0] - pts[3][0], pts[0][1] - pts[3][1])
+                # Check if opposite edges are equal within 1cm
+                if abs(l1 - l3) < 1.0 and abs(l2 - l4) < 1.0:
+                    is_rect = True
+                    incident_thicknesses = []
+                    for i in range(4):
+                        p_a = pts[i]
+                        p_b = pts[(i + 1) % 4]
+                        for w in self.walls.values():
+                            if w.level_id != r.level_id:
+                                continue
+                            d_fwd = math.hypot(w.x_start - p_a[0], w.y_start - p_a[1]) + math.hypot(w.x_end - p_b[0], w.y_end - p_b[1])
+                            d_rev = math.hypot(w.x_start - p_b[0], w.y_start - p_b[1]) + math.hypot(w.x_end - p_a[0], w.y_end - p_a[1])
+                            if d_fwd < 10.0 or d_rev < 10.0:
+                                incident_thicknesses.append(w.thickness)
+                                break
+                    if incident_thicknesses:
+                        t_cm = sum(incident_thicknesses) / len(incident_thicknesses)
+                        t_m = t_cm / 100.0
+                    elif self.walls:
+                        t_m = (sum(w.thickness for w in self.walls.values()) / len(self.walls)) / 100.0
+                    else:
+                        t_m = 0.0
+
+            if is_rect and t_m > 0.0:
+                l1_m = l1 / 100.0
+                l2_m = l2 / 100.0
+                c1 = max(0.0, l1_m - t_m)
+                c2 = max(0.0, l2_m - t_m)
                 clear_core_area_m2 += c1 * c2
                 clear_face_skirting_gross_m += 2.0 * (c1 + c2)
             else:
@@ -325,10 +362,43 @@ class HomeModel:
 
         clear_face_skirting_net_m = round(max(0.0, clear_face_skirting_gross_m - doors_deduction_m), 2)
 
+        # Net physical masonry volume
+        try:
+            from shapely.geometry import Polygon, LineString
+            from shapely.ops import unary_union
+            wall_polys = []
+            for w in self.walls.values():
+                t = w.thickness / 2.0
+                if abs(w.arc_extent) > 1e-4 and w.length > 0:
+                    steps = max(16, int(abs(w.arc_extent) / 5.0))
+                    pts = [w.point_at_offset(i * w.length / steps) for i in range(steps + 1)]
+                    wall_polys.append(LineString(pts).buffer(t, cap_style="square"))
+                else:
+                    if w.chord_length < 1e-4:
+                        continue
+                    wall_polys.append(LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)]).buffer(t, cap_style="square"))
+            if wall_polys:
+                union_footprint_m2 = unary_union(wall_polys).area / 10000.0
+                avg_wall_h_m = (sum(w.height for w in self.walls.values()) / len(self.walls)) / 100.0
+                gross_volume_m3 = union_footprint_m2 * avg_wall_h_m
+            else:
+                gross_volume_m3 = 0.0
+        except Exception:
+            gross_volume_m3 = sum((w.length / 100.0) * (w.thickness / 100.0) * (w.height / 100.0) for w in self.walls.values())
+
+        void_volume_m3 = 0.0
+        for op in self.openings.values():
+            w_h = self.walls.get(op.wall_id)
+            t_m = (w_h.thickness / 100.0) if w_h else 0.15
+            void_volume_m3 += (op.width_cm / 100.0) * (op.height_cm / 100.0) * t_m
+
+        net_masonry_volume_m3 = round(max(0.0, gross_volume_m3 - void_volume_m3), 3)
+
         summary = {
             "wall_perimeter_m": self.total_wall_length_m,
             "wall_gross_area_m2": gross_wall_m2,
             "wall_net_area_m2": net_wall_masonry_m2,
+            "net_masonry_volume_m3": net_masonry_volume_m3,
             "wall_paint_area_m2": interior_paint_m2,
             "floor_area_m2": total_floor_m2,
             "clear_core_area_m2": round(clear_core_area_m2, 3),
@@ -357,6 +427,7 @@ class HomeModel:
                 "gross_wall_surface_m2": gross_wall_m2,
                 "openings_deduction_m2": openings_m2,
                 "net_masonry_wall_m2": net_wall_masonry_m2,
+                "net_masonry_volume_m3": net_masonry_volume_m3,
                 "interior_wall_paint_m2": interior_paint_m2,
             },
             "openings_schedule": {
@@ -571,8 +642,27 @@ class HomeModel:
                         return False
             return True
 
+        def _is_finite_wall(w):
+            return all(math.isfinite(v) for v in (w.x_start, w.y_start, w.x_end, w.y_end, w.height, w.thickness, w.arc_extent))
+
+        def _is_finite_room(r):
+            return all(math.isfinite(p[0]) and math.isfinite(p[1]) for p in r.points)
+
+        def _is_finite_opening(op):
+            vals = [op.offset_cm, op.width_cm, op.height_cm, op.elevation_cm]
+            if op.depth_cm is not None: vals.append(op.depth_cm)
+            if op.x_cm is not None: vals.append(op.x_cm)
+            if op.y_cm is not None: vals.append(op.y_cm)
+            if op.angle_deg is not None: vals.append(op.angle_deg)
+            return all(math.isfinite(v) for v in vals)
+
+        def _is_finite_furniture(f):
+            return all(math.isfinite(v) for v in (f.x_cm, f.y_cm, f.elevation_cm, f.width_cm, f.depth_cm, f.height_cm, f.angle_deg))
+
         furn_by_level = {}
         for f in self.furniture.values():
+            if not _is_finite_furniture(f):
+                continue
             if f.width_cm <= 0 or f.depth_cm <= 0 or f.height_cm <= 0:
                 msg = f"Furniture '{f.id}' has non-positive dimensions ({f.width_cm}x{f.depth_cm}x{f.height_cm} cm)."
                 errors.append(msg)
@@ -721,28 +811,42 @@ class HomeModel:
 
         # Gate C03 & C04: Check furniture vs physical wall material (accounting for opening cutouts)
         try:
-            from shapely.geometry import Polygon
+            from shapely.geometry import Polygon, LineString
             has_shapely = True
         except ImportError:
             has_shapely = False
 
         if has_shapely:
-            for lvl_id, furn_list in furn_by_level.items():
-                for f in furn_list:
-                    f_corners = _get_furn_corners(f)
-                    f_z0 = f.elevation_cm
-                    f_z1 = f.elevation_cm + f.height_cm
-                    furn_poly = Polygon(f_corners)
+            for f in self.furniture.values():
+                if not _is_finite_furniture(f):
+                    continue
+                f_lvl = self.get_level(f.level_id)
+                f_elev = f_lvl.elevation_cm if f_lvl else 0.0
+                f_world_z0 = f_elev + f.elevation_cm
+                f_world_z1 = f_world_z0 + f.height_cm
+                f_corners = _get_furn_corners(f)
+                furn_poly = Polygon(f_corners)
 
-                    for w in self.walls.values():
-                        if w.level_id != lvl_id:
-                            continue
-                        lvl_obj = self.get_level(lvl_id)
-                        w_z0 = lvl_obj.elevation_cm if lvl_obj else 0.0
-                        w_z1 = w_z0 + w.height
-                        if max(f_z0, w_z0) >= min(f_z1, w_z1):
-                            continue
+                for w in self.walls.values():
+                    if not _is_finite_wall(w):
+                        continue
+                    w_lvl = self.get_level(w.level_id)
+                    w_elev = w_lvl.elevation_cm if w_lvl else 0.0
+                    w_world_z0 = w_elev
+                    w_world_z1 = w_world_z0 + w.height
 
+                    # Check world Z interval overlap
+                    overlap_z0 = max(f_world_z0, w_world_z0)
+                    overlap_z1 = min(f_world_z1, w_world_z1)
+                    if overlap_z0 >= overlap_z1 - 1e-4:
+                        continue
+
+                    # Construct 2D wall polygon
+                    if abs(w.arc_extent) > 1e-4 and w.length > 0:
+                        steps = max(16, int(abs(w.arc_extent) / 5.0))
+                        pts = [w.point_at_offset(i * w.length / steps) for i in range(steps + 1)]
+                        wall_poly = LineString(pts).buffer(w.thickness / 2.0, cap_style="flat")
+                    else:
                         L = w.length
                         if L < 1e-4:
                             continue
@@ -756,28 +860,49 @@ class HomeModel:
                         ]
                         wall_poly = Polygon(wall_corners)
 
-                        # Subtract opening cutouts present in this furniture Z-interval
-                        for op in self.openings.values():
-                            if op.wall_id != w.id:
-                                continue
-                            op_z0 = op.elevation_cm
-                            op_z1 = op.elevation_cm + op.height_cm
-                            if max(f_z0, op_z0) < min(f_z1, op_z1):
-                                p_center = w.point_at_offset(op.offset_cm + op.width_cm / 2.0)
-                                dx = (w.x_end - w.x_start) / L * (op.width_cm / 2.0)
-                                dy = (w.y_end - w.y_start) / L * (op.width_cm / 2.0)
-                                cutout_nx = nx * 1.5
-                                cutout_ny = ny * 1.5
-                                cutout_poly = Polygon([
-                                    (p_center[0] - dx + cutout_nx, p_center[1] - dy + cutout_ny),
-                                    (p_center[0] + dx + cutout_nx, p_center[1] + dy + cutout_ny),
-                                    (p_center[0] + dx - cutout_nx, p_center[1] + dy - cutout_ny),
-                                    (p_center[0] - dx - cutout_nx, p_center[1] - dy - cutout_ny),
-                                ])
-                                wall_poly = wall_poly.difference(cutout_poly)
+                    # Collect vertical breakpoints from openings on this wall
+                    z_breaks = {overlap_z0, overlap_z1}
+                    openings_on_wall = [op for op in self.openings.values() if op.wall_id == w.id and _is_finite_opening(op)]
+                    for op in openings_on_wall:
+                        op_world_z0 = w_elev + op.elevation_cm
+                        op_world_z1 = op_world_z0 + op.height_cm
+                        if overlap_z0 < op_world_z0 < overlap_z1:
+                            z_breaks.add(op_world_z0)
+                        if overlap_z0 < op_world_z1 < overlap_z1:
+                            z_breaks.add(op_world_z1)
 
-                        if not wall_poly.is_empty:
-                            inter = furn_poly.intersection(wall_poly)
+                    z_sorted = sorted(z_breaks)
+
+                    # Check each vertical slab
+                    for k in range(len(z_sorted) - 1):
+                        slab_z0 = z_sorted[k]
+                        slab_z1 = z_sorted[k + 1]
+                        if slab_z1 - slab_z0 < 1e-4:
+                            continue
+                        slab_poly = wall_poly
+
+                        # Subtract opening cutouts that are active throughout this slab
+                        for op in openings_on_wall:
+                            op_world_z0 = w_elev + op.elevation_cm
+                            op_world_z1 = op_world_z0 + op.height_cm
+                            if op_world_z0 <= slab_z0 + 1e-4 and op_world_z1 >= slab_z1 - 1e-4:
+                                geom = op.get_effective_geometry(w)
+                                if geom:
+                                    p1 = geom["p1"]
+                                    p2 = geom["p2"]
+                                    t_cut = max(w.thickness * 1.5, 30.0)
+                                    nx = geom["nx"] * (t_cut / 2.0)
+                                    ny = geom["ny"] * (t_cut / 2.0)
+                                    cutout_poly = Polygon([
+                                        (p1[0] + nx, p1[1] + ny),
+                                        (p2[0] + nx, p2[1] + ny),
+                                        (p2[0] - nx, p2[1] - ny),
+                                        (p1[0] - nx, p1[1] - ny),
+                                    ])
+                                    slab_poly = slab_poly.difference(cutout_poly)
+
+                        if not slab_poly.is_empty:
+                            inter = furn_poly.intersection(slab_poly)
                             if not inter.is_empty and inter.area > 0.05:
                                 msg = f"Furniture '{f.id}' ({f.name}) collides with wall material of '{w.id}'."
                                 warnings.append(msg)
@@ -786,30 +911,61 @@ class HomeModel:
                                     "severity": "warning",
                                     "entity_ids": [f.id, w.id],
                                     "message": msg,
-                                    "witness": {"penetration_area_cm2": round(inter.area, 2)}
+                                    "witness": {
+                                        "penetration_area_cm2": round(inter.area, 2),
+                                        "vertical_slab_cm": [round(slab_z0, 1), round(slab_z1, 1)]
+                                    }
                                 })
+                                break
 
             # Gate C05: Check furniture containment in assigned room
             for f in self.furniture.values():
-                room_id = getattr(f, "room_id", None)
-                if not room_id and f.extra_attribs:
-                    room_id = f.extra_attribs.get("room") or f.extra_attribs.get("room_id")
-                if room_id and room_id in self.rooms:
-                    r = self.rooms[room_id]
-                    room_poly = Polygon(r.points)
-                    furn_poly = Polygon(_get_furn_corners(f))
-                    if not room_poly.buffer(0.01).covers(furn_poly):
-                        outside = furn_poly.difference(room_poly.buffer(0.01))
-                        if not outside.is_empty and outside.area > 0.05:
-                            msg = f"Furniture '{f.id}' ({f.name}) extends outside assigned room '{r.id}' ({r.name})."
+                if not _is_finite_furniture(f):
+                    continue
+                room_id = f.room_id
+                if room_id is not None:
+                    if room_id not in self.rooms:
+                        msg = f"Furniture '{f.id}' ({f.name}) references nonexistent room '{room_id}'."
+                        errors.append(msg)
+                        findings.append({
+                            "code": "MISSING_ROOM_REFERENCE",
+                            "severity": "error",
+                            "entity_ids": [f.id],
+                            "message": msg
+                        })
+                    else:
+                        r = self.rooms[room_id]
+                        if f.level_id != r.level_id:
+                            msg = f"Furniture '{f.id}' on level '{f.level_id}' assigned to room '{r.id}' on level '{r.level_id}'."
                             warnings.append(msg)
                             findings.append({
-                                "code": "FURNITURE_OUTSIDE_ROOM",
+                                "code": "CROSS_LEVEL_ROOM_ASSIGNMENT",
                                 "severity": "warning",
                                 "entity_ids": [f.id, r.id],
-                                "message": msg,
-                                "witness": {"outside_area_cm2": round(outside.area, 2)}
+                                "message": msg
                             })
+                        if _is_finite_room(r):
+                            room_poly = Polygon(r.points)
+                            furn_poly = Polygon(_get_furn_corners(f))
+                            if not room_poly.buffer(0.01).covers(furn_poly):
+                                outside = furn_poly.difference(room_poly.buffer(0.01))
+                                if not outside.is_empty and outside.area > 0.05:
+                                    msg = f"Furniture '{f.id}' ({f.name}) extends outside assigned room '{r.id}' ({r.name})."
+                                    warnings.append(msg)
+                                    findings.append({
+                                        "code": "FURNITURE_OUTSIDE_ROOM",
+                                        "severity": "warning",
+                                        "entity_ids": [f.id, r.id],
+                                        "message": msg,
+                                        "witness": {"outside_area_cm2": round(outside.area, 2)}
+                                    })
+        else:
+            findings.append({
+                "code": "GEOMETRY_ENGINE_UNAVAILABLE",
+                "severity": "warning",
+                "message": "Shapely geometry engine is unavailable. Spatial conflict and clearance checks were skipped.",
+                "coverage": "not_checked"
+            })
 
         # 6. Check for empty structure
         if not self.walls and not self.rooms:
@@ -875,7 +1031,7 @@ class HomeModel:
             if abs(w.arc_extent) > 1e-4:
                 # Gate N03: Upstream Sweet Home 3D Java 7.5 models arcExtent in radians with inverted sign relative to +Y bulge
                 native_arc = -math.radians(w.arc_extent)
-                wall_attrib["arcExtent"] = str(round(native_arc, 6))
+                wall_attrib["arcExtent"] = str(native_arc)
             wall_attrib.update(w.extra_attribs)
             w_elem = ET.SubElement(root, "wall", **wall_attrib)
             for raw_child in w.extra_children:
@@ -920,7 +1076,7 @@ class HomeModel:
                     "x": str(round(out_x, 2)),
                     "y": str(round(out_y, 2)),
                     "depth": str(depth_val),
-                    "angle": str(round(out_angle, 4)),
+                    "angle": str(out_angle),
                     "level": op.level_id or wall.level_id,
                 })
             else:
@@ -934,7 +1090,7 @@ class HomeModel:
                 if op.depth_cm is not None:
                     op_attrib["depth"] = str(op.depth_cm)
                 if op.angle_deg is not None:
-                    op_attrib["angle"] = str(round(math.radians(op.angle_deg), 4))
+                    op_attrib["angle"] = str(math.radians(op.angle_deg))
                 if op.level_id:
                     op_attrib["level"] = op.level_id
             op_attrib.update(op.extra_attribs)
@@ -952,7 +1108,7 @@ class HomeModel:
                 "name": f.name, "catalogId": f.catalog_id,
                 "x": str(f.x_cm), "y": str(f.y_cm), "elevation": str(f.elevation_cm),
                 "width": str(f.width_cm), "depth": str(f.depth_cm), "height": str(f.height_cm),
-                "angle": str(round(math.radians(f.angle_deg), 4))
+                "angle": str(math.radians(f.angle_deg))
             }
             f_attrib.update(f.extra_attribs)
             f_elem = ET.SubElement(root, "pieceOfFurniture", **f_attrib)

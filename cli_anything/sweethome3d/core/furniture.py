@@ -36,7 +36,13 @@ class Furniture:
         self.catalog_id = str(catalog_id)
         self.extra_attribs = dict(extra_attribs) if extra_attribs else {}
         self.extra_children = list(extra_children) if extra_children else []
-        self.room_id = str(room_id) if room_id else (self.extra_attribs.get("room_id") or self.extra_attribs.get("room"))
+        if room_id is not None and str(room_id).strip() != "":
+            self.room_id = str(room_id).strip()
+        else:
+            raw_r = self.extra_attribs.get("room_id") if "room_id" in self.extra_attribs else self.extra_attribs.get("room")
+            self.room_id = str(raw_r).strip() if (raw_r is not None and str(raw_r).strip() != "") else None
+        if self.room_id is not None:
+            self.extra_attribs["room_id"] = self.room_id
         
         # Check catalog presets for default dimensions
         preset = FURNITURE_CATALOG.get(self.catalog_id)

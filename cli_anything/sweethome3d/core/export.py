@@ -5,6 +5,18 @@ import re
 import html
 import xml.sax.saxutils as saxutils
 
+def _get_furn_corners(f):
+    rad = math.radians(f.angle_deg)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    dx1, dy1 = (f.width_cm / 2.0) * cos_a, (f.width_cm / 2.0) * sin_a
+    dx2, dy2 = -(f.depth_cm / 2.0) * sin_a, (f.depth_cm / 2.0) * cos_a
+    return [
+        (f.x_cm - dx1 - dx2, f.y_cm - dy1 - dy2),
+        (f.x_cm + dx1 - dx2, f.y_cm - dy1 - dy2),
+        (f.x_cm + dx1 + dx2, f.y_cm + dy1 + dy2),
+        (f.x_cm - dx1 + dx2, f.y_cm - dy1 + dy2),
+    ]
+
 def calculate_bounds(model, margin_cm=100.0, level_id=None):
     """Calculates min/max bounding box coordinates in cm across walls, rooms, and furniture."""
     xs = []
@@ -274,13 +286,17 @@ def export_svg(model, filepath, level_id=None):
             f'    <text class="dimension-text" x="{mid_x:.1f}" y="{mid_y:.1f}">{dim.distance_m:.2f} m</text>'
         )
 
+    # Layer 6: Title Block
+    scoped_area = sum(r.area_m2 for r in rooms) if level_id else model.total_area_m2
+    scoped_wall_len = sum(w.length_m for w in walls) if level_id else model.total_wall_length_m
+
     svg_lines.extend([
         f'  </g>',
         f'',
         f'  <!-- Layer 6: Title Block -->',
         f'  <g id="layer-title-block">',
         f'    <text class="title-block" x="{min_x + 30:.1f}" y="{min_y + 40:.1f}">{saxutils.escape(model.name)}{saxutils.escape(level_title)}</text>',
-        f'    <text class="room-area" x="{min_x + 30:.1f}" y="{min_y + 70:.1f}" text-anchor="start">Total Area: {model.total_area_m2:.2f} m² | Walls: {model.total_wall_length_m:.1f} m</text>',
+        f'    <text class="room-area" x="{min_x + 30:.1f}" y="{min_y + 70:.1f}" text-anchor="start">Total Area: {scoped_area:.2f} m² | Walls: {scoped_wall_len:.1f} m</text>',
         f'  </g>',
         f'</svg>',
     ])
@@ -320,13 +336,49 @@ def export_dxf(model, filepath, level_id=None):
     # DXF Entities
     dxf.extend(["0", "SECTION", "2", "ENTITIES"])
 
-    # Walls as Lines
+    # Walls as Lines or Curved Polylines
     for w in walls:
-        dxf.extend([
-            "0", "LINE", "8", "WALLS",
-            "10", f"{w.x_start:.2f}", "20", f"{w.y_start:.2f}", "30", "0.0",
-            "11", f"{w.x_end:.2f}", "21", f"{w.y_end:.2f}", "31", "0.0",
-        ])
+        if abs(w.arc_extent) > 1e-4 and w.length > 0:
+            steps = max(16, int(abs(w.arc_extent) / 5.0))
+            pts = [w.point_at_offset(i * w.length / steps) for i in range(steps + 1)]
+            dxf.extend(["0", "POLYLINE", "8", "WALLS", "66", "1", "70", "0"])
+            for p in pts:
+                dxf.extend(["0", "VERTEX", "8", "WALLS", "10", f"{p[0]:.2f}", "20", f"{p[1]:.2f}", "30", "0.0"])
+            dxf.extend(["0", "SEQEND"])
+        else:
+            dxf.extend([
+                "0", "LINE", "8", "WALLS",
+                "10", f"{w.x_start:.2f}", "20", f"{w.y_start:.2f}", "30", "0.0",
+                "11", f"{w.x_end:.2f}", "21", f"{w.y_end:.2f}", "31", "0.0",
+            ])
+
+    # Openings as Lines on DOORS Layer
+    wall_ids = {w.id for w in walls}
+    openings = [
+        op for op in model.openings.values()
+        if op.wall_id in wall_ids or (not op.wall_id and (not level_id or op.level_id == level_id))
+    ]
+    for op in openings:
+        w_host = model.walls.get(op.wall_id)
+        geom = op.get_effective_geometry(w_host)
+        if not geom:
+            continue
+        p1 = geom["p1"]
+        p2 = geom["p2"]
+        if op.opening_type == "door":
+            hinge = geom["hinge"]
+            p_open = geom["open_endpoint"]
+            dxf.extend([
+                "0", "LINE", "8", "DOORS",
+                "10", f"{hinge[0]:.2f}", "20", f"{hinge[1]:.2f}", "30", "0.0",
+                "11", f"{p_open[0]:.2f}", "21", f"{p_open[1]:.2f}", "31", "0.0",
+            ])
+        else:
+            dxf.extend([
+                "0", "LINE", "8", "DOORS",
+                "10", f"{p1[0]:.2f}", "20", f"{p1[1]:.2f}", "30", "0.0",
+                "11", f"{p2[0]:.2f}", "21", f"{p2[1]:.2f}", "31", "0.0",
+            ])
 
     # Rooms as Polylines + Text labels
     for r in rooms:
@@ -342,8 +394,13 @@ def export_dxf(model, filepath, level_id=None):
                 "40", "20.0", "1", f"{r.name} ({r.area_m2:.1f} m2)",
             ])
 
-    # Furniture as Text
+    # Furniture as Footprint Polyline + Text
     for f in furniture:
+        corners = _get_furn_corners(f)
+        dxf.extend(["0", "POLYLINE", "8", "FURNITURE", "66", "1", "70", "1"])
+        for p in corners:
+            dxf.extend(["0", "VERTEX", "8", "FURNITURE", "10", f"{p[0]:.2f}", "20", f"{p[1]:.2f}", "30", "0.0"])
+        dxf.extend(["0", "SEQEND"])
         dxf.extend([
             "0", "TEXT", "8", "FURNITURE",
             "10", f"{f.x_cm:.2f}", "20", f"{f.y_cm:.2f}", "30", "0.0",
@@ -416,6 +473,27 @@ def export_html(model, filepath, level_id=None):
     safe_title = html.escape(model.name)
     svg_clean = re.sub(r'<\?xml.*?\?>', '', svg_xml, flags=re.DOTALL).strip()
 
+    if level_id:
+        scoped_rooms = [r for r in model.rooms.values() if r.level_id == level_id]
+        scoped_walls = [w for w in model.walls.values() if w.level_id == level_id]
+        scoped_wall_ids = {w.id for w in scoped_walls}
+        scoped_openings = [
+            op for op in model.openings.values()
+            if op.wall_id in scoped_wall_ids or (not op.wall_id and op.level_id == level_id)
+        ]
+        scoped_furniture = [f for f in model.furniture.values() if f.level_id == level_id]
+        total_floor_area = sum(r.area_m2 for r in scoped_rooms)
+        total_wall_len = sum(w.length_m for w in scoped_walls)
+        gross_wall_m2 = sum((w.length * w.height) / 10000.0 for w in scoped_walls)
+        openings_m2 = sum((op.width_cm * op.height_cm) / 10000.0 for op in scoped_openings)
+        net_wall_m2 = max(0.0, gross_wall_m2 - openings_m2)
+        total_furniture_items = len(scoped_furniture)
+    else:
+        total_floor_area = takeoff_data['floor_and_ceiling']['total_floor_area_m2']
+        total_wall_len = takeoff_data['masonry_and_walls']['total_wall_length_m']
+        net_wall_m2 = takeoff_data['masonry_and_walls']['net_masonry_wall_m2']
+        total_furniture_items = takeoff_data['furniture_schedule']['total_items']
+
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -449,19 +527,19 @@ def export_html(model, filepath, level_id=None):
 
     <div class="stat-grid takeoff-panel">
       <div class="stat-card">
-        <div class="stat-val">{takeoff_data['floor_and_ceiling']['total_floor_area_m2']:.2f} m²</div>
+        <div class="stat-val">{total_floor_area:.2f} m²</div>
         <div class="stat-lbl">Total Floor Area</div>
       </div>
       <div class="stat-card">
-        <div class="stat-val">{takeoff_data['masonry_and_walls']['total_wall_length_m']:.1f} m</div>
+        <div class="stat-val">{total_wall_len:.1f} m</div>
         <div class="stat-lbl">Linear Wall Run</div>
       </div>
       <div class="stat-card">
-        <div class="stat-val">{takeoff_data['masonry_and_walls']['net_masonry_wall_m2']:.1f} m²</div>
+        <div class="stat-val">{net_wall_m2:.1f} m²</div>
         <div class="stat-lbl">Net Masonry Wall</div>
       </div>
       <div class="stat-card">
-        <div class="stat-val">{takeoff_data['furniture_schedule']['total_items']}</div>
+        <div class="stat-val">{total_furniture_items}</div>
         <div class="stat-lbl">Furniture Assets</div>
       </div>
     </div>
