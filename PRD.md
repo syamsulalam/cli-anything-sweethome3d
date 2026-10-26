@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.5.0 (PAC-1 Contract Iteration 14)  
+**Document Version:** 2.6.0 (PAC-1 Contract Iteration 15)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -109,6 +109,26 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
   - Add test that generates DXF, parses `WALLS/VERTEX` group-code coordinates, and verifies maximum distance to true arc is `<= 0.01 cm`. (`✅ Completed`)
 - [x] **R13-P2-01: Accurate Documentation & Test Boundaries**:
   - Maintained exact AST test enumeration (103 core + 4 E2E = 107 total tests) and verified 100% pass rate in 7.69s. (`✅ Completed`)
+
+### Phase 10: Sol Round 14 Prescriptions — Antiparallel Door Remapping, Native Children, Direct API Atomicity & Unique Curves (PAC-1 Iteration 15)
+- [x] **R14-P1-01: Antiparallel Source Remapping & Exact Physical Geometry**:
+  - In `Opening.get_effective_geometry()`, eliminate floating-point epsilon noise on cardinal angles (`abs(ux) < 1e-9`, `abs(uy) < 1e-9`).
+  - In `HomeModel.node_walls()`, determine relative direction of atom vs source wall.
+  - For aligned atoms, `new_offset = op.offset_cm - s_start`. For reversed/antiparallel atoms, `new_offset = s_end - (op.offset_cm + op.width_cm)`.
+  - Preserve explicit physical pose (`x_cm`, `y_cm`, `angle_deg`) so `center`, `hinge`, and `open_endpoint` remain 100% invariant across noding. (`✅ Completed`)
+- [x] **R14-P1-02: Native Children Preservation & Physical Face Intent Conflict Checking**:
+  - Preserve `extra_children` on each atom (`extra_children=list(base_w.extra_children)`).
+  - Compare physical face intent across overlapping walls after orientation normalization; reject conflicting side colors with `ValueError("Conflicting wall face color/material intent")`. (`✅ Completed`)
+- [x] **R14-P1-03: Direct Model Atomicity & Global ID Reservation**:
+  - In `node_walls()`, reserve `used_ids = set(self.walls.keys())` including existing curved walls across all levels, eliminating collisions with retained curves (`w_1`).
+  - Guarantee full atomicity on direct model API calls: snapshot `orig_walls` and `orig_openings`, and roll back completely if any exception occurs during noding or validation. (`✅ Completed`)
+- [x] **R14-P1-04: Coincident Curved Wall Deduplication**:
+  - In `total_noded_wall_length_m` and `get_noded_wall_segments()`, canonicalize curved wall identity via `min((p1, p2, arc), (p2, p1, -arc))`.
+  - Deduplicate coincident curved walls on the same level, reporting exact unique physical run (4.44m on two coincident 90° arcs, not 8.89m). (`✅ Completed`)
+- [x] **R14-P2-01: Reconciled Test Suite**:
+  - AST enumeration: 107 core + 4 E2E = **111 total tests** (100% pass rate in 5.34s).
+  - All 4 architectural templates pass validation with 0 errors and 0 warnings. (`✅ Completed`)
+
 
 
 

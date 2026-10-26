@@ -66,9 +66,13 @@ class Opening:
                 return None
             rad = math.radians(eff_angle)
             ux, uy = math.cos(rad), math.sin(rad)
+            if abs(uy) < 1e-9:
+                uy = 0.0
+            if abs(ux) < 1e-9:
+                ux = 0.0
             nx, ny = -uy, ux
-            p1 = (center_x - (w / 2.0) * ux, center_y - (w / 2.0) * uy)
-            p2 = (center_x + (w / 2.0) * ux, center_y + (w / 2.0) * uy)
+            p1 = (round(center_x - (w / 2.0) * ux, 4), round(center_y - (w / 2.0) * uy, 4))
+            p2 = (round(center_x + (w / 2.0) * ux, 4), round(center_y + (w / 2.0) * uy, 4))
         elif wall is not None:
             if self.offset_cm is None or not isinstance(self.offset_cm, (int, float)) or not math.isfinite(self.offset_cm):
                 return None

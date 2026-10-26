@@ -264,7 +264,7 @@ class HomeModel:
         """Derives the physical noded wall arrangement across all intersecting/overlapping walls (PAC-1 T01-T03).
         
         Splits collinear overlapping walls and T/X-junctions into unique non-overlapping physical atoms,
-        and includes curved wall segments with their analytic arc length and extent.
+        and includes unique curved wall segments with their analytic arc length and extent.
         """
         try:
             from shapely.geometry import LineString, MultiLineString
@@ -275,6 +275,12 @@ class HomeModel:
         target_levels = [level_id] if level_id else [lvl.id for lvl in self.levels]
         if not target_levels:
             target_levels = list(set(w.level_id for w in self.walls.values())) or ["level1"]
+
+        def _canonical_arc_key(w):
+            p1 = (round(w.x_start, 2), round(w.y_start, 2))
+            p2 = (round(w.x_end, 2), round(w.y_end, 2))
+            arc = round(float(w.arc_extent), 2)
+            return min((p1, p2, arc), (p2, p1, -arc))
 
         noded = []
         for lvl in target_levels:
@@ -303,20 +309,24 @@ class HomeModel:
                                 "level_id": lvl,
                             })
             
-            # Include curved walls with analytic length
+            # Include unique curved walls with analytic length
+            seen_arcs = set()
             for w in lvl_walls:
                 if abs(getattr(w, "arc_extent", 0.0)) >= 1e-4 and w.length > 1e-4:
-                    noded.append({
-                        "x_start": round(w.x_start, 2),
-                        "y_start": round(w.y_start, 2),
-                        "x_end": round(w.x_end, 2),
-                        "y_end": round(w.y_end, 2),
-                        "length_m": round(w.length / 100.0, 3),
-                        "arc_extent": w.arc_extent,
-                        "is_curved": True,
-                        "level_id": lvl,
-                        "wall_id": w.id,
-                    })
+                    k = _canonical_arc_key(w)
+                    if k not in seen_arcs:
+                        seen_arcs.add(k)
+                        noded.append({
+                            "x_start": round(w.x_start, 2),
+                            "y_start": round(w.y_start, 2),
+                            "x_end": round(w.x_end, 2),
+                            "y_end": round(w.y_end, 2),
+                            "length_m": round(w.length / 100.0, 3),
+                            "arc_extent": w.arc_extent,
+                            "is_curved": True,
+                            "level_id": lvl,
+                            "wall_id": w.id,
+                        })
 
         return noded
 
@@ -324,7 +334,7 @@ class HomeModel:
     def total_noded_wall_length_m(self):
         """Total run of unique physical walls in linear meters without double-counting overlaps (PAC-1 T01-T03, T05, T09).
         
-        Separates physical wall runs by level and computes exact analytic arc lengths for curved walls.
+        Separates physical wall runs by level and computes exact analytic arc lengths for unique curved walls.
         """
         try:
             from shapely.geometry import LineString
@@ -333,6 +343,12 @@ class HomeModel:
             target_levels = [lvl.id for lvl in self.levels]
             if not target_levels:
                 target_levels = list(set(w.level_id for w in self.walls.values())) or ["level1"]
+
+            def _canonical_arc_key(w):
+                p1 = (round(w.x_start, 2), round(w.y_start, 2))
+                p2 = (round(w.x_end, 2), round(w.y_end, 2))
+                arc = round(float(w.arc_extent), 2)
+                return min((p1, p2, arc), (p2, p1, -arc))
             
             total_cm = 0.0
             for lvl in target_levels:
@@ -345,10 +361,14 @@ class HomeModel:
                 if straight_lines:
                     total_cm += unary_union(straight_lines).length
                 
-                # Add exact analytic arc length for curved walls
+                # Add exact analytic arc length for unique curved walls
+                seen_arcs = set()
                 for w in lvl_walls:
                     if abs(getattr(w, "arc_extent", 0.0)) >= 1e-4 and w.length > 1e-4:
-                        total_cm += w.length
+                        k = _canonical_arc_key(w)
+                        if k not in seen_arcs:
+                            seen_arcs.add(k)
+                            total_cm += w.length
 
             return round(total_cm / 100.0, 2)
         except Exception:
@@ -357,8 +377,9 @@ class HomeModel:
     def node_walls(self, level_id=None):
         """Replaces collinear overlapping and intersecting walls with their noded physical atoms (PAC-1 T01-T04, T06).
         
-        Preserves wall attributes, detects conflicting overlapping walls, remaps hosted openings atomically,
-        and enforces model validation before commit.
+        Preserves wall attributes and children, detects conflicting overlapping walls and face intents,
+        remaps hosted openings atomically with signed station transforms, preserves exact physical opening geometry,
+        and guarantees atomic rollback if any validation or conversion error occurs.
         """
         try:
             from shapely.geometry import LineString
@@ -370,132 +391,173 @@ class HomeModel:
         if not target_levels:
             target_levels = list(set(w.level_id for w in self.walls.values())) or ["level1"]
 
-        total_noded = 0
-        for lvl in target_levels:
-            lvl_walls = [
-                w for w in self.walls.values()
-                if w.level_id == lvl and abs(getattr(w, "arc_extent", 0.0)) < 1e-4 and w.chord_length > 1e-4
-            ]
-            if not lvl_walls:
-                continue
+        # Preserve snapshot for full atomicity across direct model API calls
+        orig_walls = dict(self.walls)
+        orig_openings = dict(self.openings)
 
-            lines = [LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)]) for w in lvl_walls]
-            u = unary_union(lines)
-            geoms = list(u.geoms) if hasattr(u, "geoms") else [u]
+        try:
+            total_noded = 0
+            # Reserve all entity IDs across all levels and curves
+            used_ids = set(self.walls.keys())
 
-            raw_atoms = []
-            for g in geoms:
-                if isinstance(g, LineString) and g.length > 1e-4:
-                    coords = list(g.coords)
-                    for i in range(len(coords) - 1):
-                        p1, p2 = coords[i], coords[i + 1]
-                        raw_atoms.append((p1, p2))
-
-            if not raw_atoms:
-                continue
-
-            # Identify source walls for each atom and assert attribute compatibility
-            atom_sources = []
-            for p1, p2 in raw_atoms:
-                atom_line = LineString([p1, p2])
-                sources = []
-                for w in lvl_walls:
-                    w_line = LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)])
-                    if w_line.distance(atom_line) < 1e-4 and w_line.intersection(atom_line).length > 1e-4:
-                        sources.append(w)
-                if not sources:
+            for lvl in target_levels:
+                lvl_walls = [
+                    w for w in self.walls.values()
+                    if w.level_id == lvl and abs(getattr(w, "arc_extent", 0.0)) < 1e-4 and w.chord_length > 1e-4
+                ]
+                if not lvl_walls:
                     continue
-                
-                # Check attribute compatibility across overlapping sources
-                base_w = sources[0]
-                for other in sources[1:]:
-                    if abs(other.thickness - base_w.thickness) > 1e-3:
-                        raise ValueError(f"Conflicting wall thickness on overlapping segment between {base_w.id} ({base_w.thickness}cm) and {other.id} ({other.thickness}cm)")
-                    if abs(other.height - base_w.height) > 1e-3:
-                        raise ValueError(f"Conflicting wall height on overlapping segment between {base_w.id} ({base_w.height}cm) and {other.id} ({other.height}cm)")
 
-                # Orient atom to match base source wall direction
-                dx, dy = base_w.x_end - base_w.x_start, base_w.y_end - base_w.y_start
-                atom_dx, atom_dy = p2[0] - p1[0], p2[1] - p1[1]
-                if (atom_dx * dx + atom_dy * dy) < 0:
-                    p1, p2 = p2, p1
-                
-                atom_sources.append((p1, p2, sources))
+                lines = [LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)]) for w in lvl_walls]
+                u = unary_union(lines)
+                geoms = list(u.geoms) if hasattr(u, "geoms") else [u]
 
-            # Build wall_id -> list of (atom_idx, s_start, s_end)
-            wall_to_atoms = {w.id: [] for w in lvl_walls}
-            for a_idx, (p1, p2, sources) in enumerate(atom_sources):
-                for w in sources:
-                    dx, dy = w.x_end - w.x_start, w.y_end - w.y_start
-                    L = w.chord_length
-                    ux, uy = dx / L, dy / L
-                    proj1 = (p1[0] - w.x_start) * ux + (p1[1] - w.y_start) * uy
-                    proj2 = (p2[0] - w.x_start) * ux + (p2[1] - w.y_start) * uy
-                    s_start, s_end = min(proj1, proj2), max(proj1, proj2)
-                    wall_to_atoms[w.id].append((a_idx, s_start, s_end))
+                raw_atoms = []
+                for g in geoms:
+                    if isinstance(g, LineString) and g.length > 1e-4:
+                        coords = list(g.coords)
+                        for i in range(len(coords) - 1):
+                            p1, p2 = coords[i], coords[i + 1]
+                            raw_atoms.append((p1, p2))
 
-            # Remap openings and check if any opening spans a split point
-            opening_remaps = {}
-            for op in self.openings.values():
-                if op.wall_id in wall_to_atoms:
-                    w = self.walls[op.wall_id]
-                    op_start = op.offset_cm
-                    op_end = op.offset_cm + op.width_cm
-                    matched_atom = None
-                    for a_idx, s_start, s_end in wall_to_atoms[w.id]:
-                        if op_start >= s_start - 1e-3 and op_end <= s_end + 1e-3:
-                            matched_atom = (a_idx, s_start)
-                            break
-                    if matched_atom is None:
-                        raise ValueError(f"Cannot node walls: opening '{op.id}' ({op.name}) on wall '{w.id}' spans across split point or extends beyond wall boundaries")
-                    opening_remaps[op.id] = matched_atom
+                if not raw_atoms:
+                    continue
 
-            # Allocate unique atom IDs
-            atom_ids = []
-            used_ids = set(w.id for w in self.walls.values() if w.level_id != lvl)
-            for a_idx, (p1, p2, sources) in enumerate(atom_sources):
-                if len(sources) == 1 and len(wall_to_atoms[sources[0].id]) == 1:
-                    cand_id = sources[0].id
-                elif len(sources) == 1:
-                    cand_id = f"{sources[0].id}_{a_idx + 1}"
-                else:
-                    cand_id = f"w_{lvl}_node_{a_idx + 1}"
-                
-                suffix_idx = 1
-                final_id = cand_id
-                while final_id in used_ids:
-                    final_id = f"{cand_id}_{suffix_idx}"
-                    suffix_idx += 1
-                used_ids.add(final_id)
-                atom_ids.append(final_id)
+                # Identify source walls for each atom and assert attribute compatibility
+                atom_sources = []
+                for p1, p2 in raw_atoms:
+                    atom_line = LineString([p1, p2])
+                    sources = []
+                    for w in lvl_walls:
+                        w_line = LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)])
+                        if w_line.distance(atom_line) < 1e-4 and w_line.intersection(atom_line).length > 1e-4:
+                            sources.append(w)
+                    if not sources:
+                        continue
+                    
+                    # Check attribute and face intent compatibility across overlapping sources
+                    base_w = sources[0]
+                    dx1, dy1 = base_w.x_end - base_w.x_start, base_w.y_end - base_w.y_start
+                    for other in sources[1:]:
+                        if abs(other.thickness - base_w.thickness) > 1e-3:
+                            raise ValueError(f"Conflicting wall thickness on overlapping segment between {base_w.id} ({base_w.thickness}cm) and {other.id} ({other.thickness}cm)")
+                        if abs(other.height - base_w.height) > 1e-3:
+                            raise ValueError(f"Conflicting wall height on overlapping segment between {base_w.id} ({base_w.height}cm) and {other.id} ({other.height}cm)")
 
-            # Delete old walls on this level
-            for w in lvl_walls:
-                del self.walls[w.id]
+                        # Compare face intent in normalized physical orientation
+                        dx2, dy2 = other.x_end - other.x_start, other.y_end - other.y_start
+                        aligned = (dx1 * dx2 + dy1 * dy2) > 0
+                        if aligned:
+                            l1, l2 = base_w.extra_attribs.get('leftSideColor'), other.extra_attribs.get('leftSideColor')
+                            r1, r2 = base_w.extra_attribs.get('rightSideColor'), other.extra_attribs.get('rightSideColor')
+                        else:
+                            l1, l2 = base_w.extra_attribs.get('leftSideColor'), other.extra_attribs.get('rightSideColor')
+                            r1, r2 = base_w.extra_attribs.get('rightSideColor'), other.extra_attribs.get('leftSideColor')
+                        if (l1 and l2 and l1 != l2) or (r1 and r2 and r1 != r2):
+                            raise ValueError(f"Conflicting wall face color/material intent on overlapping segment between {base_w.id} and {other.id}")
 
-            # Add new noded walls with preserved source attributes
-            for a_idx, (p1, p2, sources) in enumerate(atom_sources):
-                base_w = sources[0]
-                new_id = atom_ids[a_idx]
-                self.add_wall(
-                    new_id, round(p1[0], 2), round(p1[1], 2), round(p2[0], 2), round(p2[1], 2),
-                    thickness=base_w.thickness, height=base_w.height, level_id=lvl,
-                    extra_attribs=dict(base_w.extra_attribs)
-                )
-                total_noded += 1
+                    # Orient atom to match base source wall direction
+                    atom_dx, atom_dy = p2[0] - p1[0], p2[1] - p1[1]
+                    if (atom_dx * dx1 + atom_dy * dy1) < 0:
+                        p1, p2 = p2, p1
+                    
+                    atom_sources.append((p1, p2, sources))
 
-            # Remap openings
-            for op_id, (a_idx, s_start) in opening_remaps.items():
-                op = self.openings[op_id]
-                op.wall_id = atom_ids[a_idx]
-                op.offset_cm = round(op.offset_cm - s_start, 2)
+                # Build wall_id -> list of (atom_idx, s_start, s_end, is_aligned)
+                wall_to_atoms = {w.id: [] for w in lvl_walls}
+                for a_idx, (p1, p2, sources) in enumerate(atom_sources):
+                    for w in sources:
+                        dx, dy = w.x_end - w.x_start, w.y_end - w.y_start
+                        L = w.chord_length
+                        ux, uy = dx / L, dy / L
+                        proj1 = (p1[0] - w.x_start) * ux + (p1[1] - w.y_start) * uy
+                        proj2 = (p2[0] - w.x_start) * ux + (p2[1] - w.y_start) * uy
+                        s_start, s_end = min(proj1, proj2), max(proj1, proj2)
+                        atom_dx, atom_dy = p2[0] - p1[0], p2[1] - p1[1]
+                        is_aligned = (dx * atom_dx + dy * atom_dy) > 0
+                        wall_to_atoms[w.id].append((a_idx, s_start, s_end, is_aligned))
 
-        # Enforce model validity
-        val = self.validate()
-        if not val["valid"]:
-            raise ValueError(f"Wall noding produced invalid model: {val['errors']}")
+                # Remap openings and check if any opening spans a split point
+                opening_remaps = {}
+                for op in self.openings.values():
+                    if op.wall_id in wall_to_atoms:
+                        w = self.walls[op.wall_id]
+                        geom = op.get_effective_geometry(w)
+                        op_start = op.offset_cm
+                        op_end = op.offset_cm + op.width_cm
+                        matched_atom = None
+                        for a_idx, s_start, s_end, is_aligned in wall_to_atoms[w.id]:
+                            if op_start >= s_start - 1e-3 and op_end <= s_end + 1e-3:
+                                matched_atom = (a_idx, s_start, s_end, is_aligned, geom)
+                                break
+                        if matched_atom is None:
+                            raise ValueError(f"Cannot node walls: opening '{op.id}' ({op.name}) on wall '{w.id}' spans across split point or extends beyond wall boundaries")
+                        opening_remaps[op.id] = matched_atom
 
-        return total_noded
+                # Allocate unique atom IDs, prioritizing preservation of unchanged walls
+                atom_ids = []
+                # Remove source walls on this level from used_ids so unchanged IDs can be preserved
+                for w in lvl_walls:
+                    used_ids.discard(w.id)
+
+                for a_idx, (p1, p2, sources) in enumerate(atom_sources):
+                    if len(sources) == 1 and len(wall_to_atoms[sources[0].id]) == 1:
+                        cand_id = sources[0].id
+                    elif len(sources) == 1:
+                        cand_id = f"{sources[0].id}_{a_idx + 1}"
+                    else:
+                        cand_id = f"w_{lvl}_node_{a_idx + 1}"
+                    
+                    suffix_idx = 1
+                    final_id = cand_id
+                    while final_id in used_ids:
+                        final_id = f"{cand_id}_{suffix_idx}"
+                        suffix_idx += 1
+                    used_ids.add(final_id)
+                    atom_ids.append(final_id)
+
+                # Delete old walls on this level
+                for w in lvl_walls:
+                    del self.walls[w.id]
+
+                # Add new noded walls with preserved source attributes and children
+                for a_idx, (p1, p2, sources) in enumerate(atom_sources):
+                    base_w = sources[0]
+                    new_id = atom_ids[a_idx]
+                    self.add_wall(
+                        new_id, round(p1[0], 2), round(p1[1], 2), round(p2[0], 2), round(p2[1], 2),
+                        thickness=base_w.thickness, height=base_w.height, level_id=lvl,
+                        extra_attribs=dict(base_w.extra_attribs),
+                        extra_children=list(base_w.extra_children)
+                    )
+                    total_noded += 1
+
+                # Remap openings with signed station transform and physical pose preservation
+                for op_id, (a_idx, s_start, s_end, is_aligned, geom) in opening_remaps.items():
+                    op = self.openings[op_id]
+                    op.wall_id = atom_ids[a_idx]
+                    if is_aligned:
+                        op.offset_cm = round(op.offset_cm - s_start, 2)
+                    else:
+                        # Antiparallel source wall: reverse station interval
+                        op.offset_cm = round(s_end - (op.offset_cm + op.width_cm), 2)
+                    if geom:
+                        op.x_cm = round(geom["center"][0], 4)
+                        op.y_cm = round(geom["center"][1], 4)
+                        op.angle_deg = geom["angle_deg"]
+
+            # Enforce model validity before committing
+            val = self.validate()
+            if not val["valid"]:
+                raise ValueError(f"Wall noding produced invalid model: {val['errors']}")
+
+            return total_noded
+
+        except Exception:
+            # Atomic rollback on any failure
+            self.walls = orig_walls
+            self.openings = orig_openings
+            raise
 
     def takeoff(self):
         """Generates an architectural takeoff / Bill of Quantities (BOQ / RAB) analysis."""

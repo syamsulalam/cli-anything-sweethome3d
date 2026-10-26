@@ -2125,6 +2125,78 @@ def test_dxf_curve_polyline_vertices_satisfy_0_01_error_budget():
 
         assert max_dev <= 0.01, f"Serialized DXF vertex deviation {max_dev:.6f} cm exceeds 0.01 cm budget!"
 
+def test_semantic_noding_antiparallel_remapping_preserves_door_geometry():
+    """PAC-1 T02, T06, E02, R14-P1-01: Antiparallel wall remapping preserves door position, center, hinge, and sweep."""
+    m = HomeModel("Antiparallel Door Remapping")
+    m.add_wall("a", 0, 0, 300, 0)
+    m.add_wall("b", 300, 0, 0, 0)
+    m.add_opening("d", "Door", wall_id="b", offset_cm=50.0, width_cm=90.0)
+
+    before = m.openings["d"].get_effective_geometry(m.walls["b"])
+    m.node_walls()
+    d = m.openings["d"]
+    after = d.get_effective_geometry(m.walls[d.wall_id])
+
+    assert before["center"] == after["center"], f"Center moved from {before['center']} to {after['center']}"
+    assert before["hinge"] == after["hinge"], f"Hinge moved from {before['hinge']} to {after['hinge']}"
+    assert before["open_endpoint"] == after["open_endpoint"], f"Open leaf endpoint changed from {before['open_endpoint']} to {after['open_endpoint']}"
+    assert m.validate()["valid"] is True
+
+def test_semantic_noding_preserves_native_children_and_rejects_face_conflict():
+    """PAC-1 T04, T06, N09, R14-P1-02: Retains wall native children and rejects conflicting face color/material intent."""
+    # 1. Unchanged wall preserves extra_children
+    m = HomeModel("Children Preservation")
+    m.add_wall("keep", 0, 0, 200, 0, extra_children=['<property name="keep" value="v"/>'])
+    m.node_walls()
+    assert "keep" in m.walls
+    assert m.walls["keep"].extra_children == ['<property name="keep" value="v"/>']
+
+    # 2. Conflicting face colors on overlapping walls must be rejected
+    m_conflict = HomeModel("Face Conflict")
+    m_conflict.add_wall("w1", 0, 0, 300, 0, extra_attribs={"leftSideColor": "00FFFFFF"})
+    m_conflict.add_wall("w2", 0, 0, 300, 0, extra_attribs={"leftSideColor": "00000000"})
+    with pytest.raises(ValueError, match="Conflicting wall face color/material intent"):
+        m_conflict.node_walls()
+
+def test_semantic_noding_direct_model_atomic_and_id_collision_safe():
+    """PAC-1 T04, T06, R14-P1-03: ID generation does not collide with retained curves; direct model API is atomic."""
+    m = HomeModel("Curve Collision & Atomicity")
+    m.add_wall("w", 0, 0, 300, 0)
+    m.add_wall("cross", 150, 0, 150, 150)
+    m.add_wall("w_1", 600, 0, 1000, 0, arc_extent=90.0)
+    
+    before_dict = m.to_dict()
+    # Should safely node without colliding with 'w_1'
+    m.node_walls()
+    assert "w_1" in m.walls, "Existing curved wall 'w_1' must be preserved!"
+    assert m.walls["w_1"].arc_extent == 90.0
+    assert m.validate()["valid"] is True
+
+    # Atomicity check on error: direct API must restore complete model if any error occurs
+    m_err = HomeModel("Atomicity Error Check")
+    m_err.add_wall("w_a", 0, 0, 300, 0, thickness=15.0)
+    m_err.add_wall("w_b", 150, 0, 450, 0, thickness=30.0)  # Conflicting thickness
+    before_err = m_err.to_dict()
+    try:
+        m_err.node_walls()
+    except ValueError:
+        pass
+    assert m_err.to_dict() == before_err, "Direct model node_walls must remain 100% atomic on failure!"
+
+def test_curved_physical_runs_unique_deduplication():
+    """PAC-1 T05, T09, E08, R14-P1-04: Coincident curved walls on same level deduplicate to unique physical run."""
+    m = HomeModel("Unique Curved Runs")
+    m.add_wall("c1", 0, 0, 400, 0, arc_extent=90.0)
+    m.add_wall("c2", 0, 0, 400, 0, arc_extent=90.0)
+
+    # 400cm chord with 90 deg arc has analytic length 4.44288... m
+    assert m.total_noded_wall_length_m == 4.44, f"Expected 4.44m unique run, got {m.total_noded_wall_length_m}"
+
+    segments = m.get_noded_wall_segments()
+    assert len(segments) == 1, f"Expected 1 unique curved segment atom, got {len(segments)}"
+    assert segments[0]["length_m"] == 4.443
+
+
 
 
 
