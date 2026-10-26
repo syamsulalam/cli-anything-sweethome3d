@@ -14,6 +14,23 @@ class ConcurrencyConflictError(RuntimeError):
     """Raised when an active session file was modified concurrently by another process."""
     pass
 
+class RecoveryRequiredError(RuntimeError):
+    """Raised when an unresolved recovery journal is present, blocking writes to prevent state corruption."""
+    pass
+
+def _calc_sha256(path):
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        import hashlib
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
 def _reconcile_pending(filepath):
     """Reconciles incomplete two-phase commits if a process crashed during persistence.
     
@@ -26,14 +43,18 @@ def _reconcile_pending(filepath):
         with open(pending_file, "r", encoding="utf-8") as pf:
             rec = json.load(pf)
     except Exception:
-        # Corrupt journal: preserve evidence for inspection
+        # Corrupt journal: preserve evidence for inspection, do NOT delete pending file
         return
 
     target = rec.get("target")
+    tmp_target = rec.get("tmp_target")
     backup = rec.get("backup")
     had_target = rec.get("had_target", False)
     staged_session = rec.get("staged_session")
+    expected_rev = rec.get("expected_revision", 0)
     target_rev = rec.get("target_revision")
+    cand_art_sha = rec.get("candidate_artifact_sha256")
+    base_art_sha = rec.get("base_artifact_sha256")
 
     curr_rev = 0
     if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
@@ -44,29 +65,77 @@ def _reconcile_pending(filepath):
             curr_rev = 0
 
     reconciled = False
+
+    # Scenario 1: Session on disk already reached target_revision (Phase 2 completed)
     if curr_rev == target_rev:
-        # Phase 2 completed before crash: cleanup backup
         if backup and os.path.exists(backup):
             try:
                 os.remove(backup)
             except OSError:
                 pass
+        if tmp_target and os.path.exists(tmp_target):
+            try:
+                os.remove(tmp_target)
+            except OSError:
+                pass
+        if staged_session and os.path.exists(staged_session):
+            try:
+                os.remove(staged_session)
+            except OSError:
+                pass
         reconciled = True
+
+    # Scenario 2: Candidate session is staged on disk
     elif staged_session and os.path.exists(staged_session):
-        # Phase 1 published target, and staged session is available:
-        # Roll forward candidate session to disk!
-        try:
-            os.replace(staged_session, filepath)
-            if backup and os.path.exists(backup):
-                try:
-                    os.remove(backup)
-                except OSError:
-                    pass
-            reconciled = True
-        except Exception:
-            reconciled = False
+        target_sha = _calc_sha256(target) if (target and os.path.exists(target)) else None
+        tmp_target_sha = _calc_sha256(tmp_target) if (tmp_target and os.path.exists(tmp_target)) else None
+
+        artifact_ready = False
+        if cand_art_sha and target_sha == cand_art_sha:
+            # Target was already published before crash
+            artifact_ready = True
+        elif tmp_target and os.path.exists(tmp_target) and (cand_art_sha is None or tmp_target_sha == cand_art_sha):
+            # Target was NOT replaced yet, but staged candidate artifact exists: complete artifact replacement!
+            try:
+                os.replace(tmp_target, target)
+                artifact_ready = True
+            except Exception:
+                artifact_ready = False
+
+        if artifact_ready:
+            # Complete session publication to match candidate artifact!
+            try:
+                os.replace(staged_session, filepath)
+                if backup and os.path.exists(backup):
+                    try:
+                        os.remove(backup)
+                    except OSError:
+                        pass
+                reconciled = True
+            except Exception:
+                reconciled = False
+        else:
+            # Candidate artifact could not be completed. We MUST roll back both session and artifact to base!
+            try:
+                if os.path.exists(staged_session):
+                    os.remove(staged_session)
+                if tmp_target and os.path.exists(tmp_target):
+                    os.remove(tmp_target)
+                if had_target and backup and os.path.exists(backup):
+                    os.replace(backup, target)
+                elif not had_target and target and os.path.exists(target):
+                    os.remove(target)
+                if backup and os.path.exists(backup):
+                    try:
+                        os.remove(backup)
+                    except OSError:
+                        pass
+                reconciled = True
+            except Exception:
+                reconciled = False
+
+    # Scenario 3: Staged session does not exist (roll back to base)
     else:
-        # Staged session not available: restore target from backup
         try:
             if had_target and backup and os.path.exists(backup):
                 os.replace(backup, target)
@@ -75,6 +144,11 @@ def _reconcile_pending(filepath):
             if backup and os.path.exists(backup):
                 try:
                     os.remove(backup)
+                except OSError:
+                    pass
+            if tmp_target and os.path.exists(tmp_target):
+                try:
+                    os.remove(tmp_target)
                 except OSError:
                     pass
             reconciled = True
@@ -142,7 +216,6 @@ def _locked_save_json(filepath, data, expected_revision=None, timeout_sec=5.0, p
     """Saves JSON data with OS-level exclusive file locking, two-phase artifact commit, and atomic replace."""
     os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
     lock_file = filepath + ".lock"
-    tmp_file = filepath + ".tmp"
     pending_file = filepath + ".pending"
 
     start_time = time.time()
@@ -173,6 +246,13 @@ def _locked_save_json(filepath, data, expected_revision=None, timeout_sec=5.0, p
         # Reconcile pending commit from any previous crash
         _reconcile_pending(filepath)
 
+        # Fail-closed check: if pending journal still exists (unresolved / corrupt), FAIL CLOSED!
+        if os.path.exists(pending_file):
+            raise RecoveryRequiredError(
+                f"Cannot save session to '{filepath}': an unresolved recovery journal '{pending_file}' is present. "
+                f"New writes are blocked to preserve evidence."
+            )
+
         # Optimistic concurrency check under exclusive write lock
         disk_rev = 0
         if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
@@ -192,6 +272,9 @@ def _locked_save_json(filepath, data, expected_revision=None, timeout_sec=5.0, p
         data["revision"] = new_rev
         payload = json.dumps(data, indent=2)
 
+        tx_id = f"{os.getpid()}_{time.time_ns()}"
+        tmp_file = f"{filepath}.tmp_{tx_id}"
+
         # Write session data to temporary file
         with open(tmp_file, "w", encoding="utf-8") as f:
             f.write(payload)
@@ -201,18 +284,23 @@ def _locked_save_json(filepath, data, expected_revision=None, timeout_sec=5.0, p
         if artifact_commit:
             art_target = artifact_commit["target"]
             art_tmp = artifact_commit["tmp_target"]
-            art_bak = art_target + f".bak_{os.getpid()}_{time.time_ns()}"
+            art_bak = art_target + f".bak_{tx_id}"
             had_target = os.path.exists(art_target)
 
             # Step 1: Prepare backup if target exists
             if had_target:
                 shutil.copy2(art_target, art_bak)
 
+            cand_art_sha = _calc_sha256(art_tmp)
+            base_art_sha = _calc_sha256(art_target) if had_target else None
+
             # Step 2: Write pending intent record atomically (FAIL CLOSED)
             pending_record = {
-                "tx_id": f"{os.getpid()}_{time.time_ns()}",
+                "tx_id": tx_id,
                 "target": art_target,
                 "tmp_target": art_tmp,
+                "candidate_artifact_sha256": cand_art_sha,
+                "base_artifact_sha256": base_art_sha,
                 "backup": art_bak if had_target else None,
                 "had_target": had_target,
                 "staged_session": tmp_file,
@@ -220,7 +308,7 @@ def _locked_save_json(filepath, data, expected_revision=None, timeout_sec=5.0, p
                 "target_revision": new_rev,
                 "active_file": data.get("active_file")
             }
-            tmp_pending = pending_file + ".tmp"
+            tmp_pending = pending_file + f".tmp_{tx_id}"
             try:
                 with open(tmp_pending, "w", encoding="utf-8") as pf:
                     json.dump(pending_record, pf, indent=2)
@@ -239,6 +327,11 @@ def _locked_save_json(filepath, data, expected_revision=None, timeout_sec=5.0, p
                         os.remove(tmp_pending)
                     except OSError:
                         pass
+                if os.path.exists(tmp_file):
+                    try:
+                        os.remove(tmp_file)
+                    except OSError:
+                        pass
                 raise RuntimeError(f"Failed to write commit journal '{pending_file}': {e_pend}") from e_pend
 
             # Step 3: Phase 1 - publish artifact
@@ -254,6 +347,11 @@ def _locked_save_json(filepath, data, expected_revision=None, timeout_sec=5.0, p
                 if os.path.exists(pending_file):
                     try:
                         os.remove(pending_file)
+                    except OSError:
+                        pass
+                if os.path.exists(tmp_file):
+                    try:
+                        os.remove(tmp_file)
                     except OSError:
                         pass
                 raise e_art
@@ -556,7 +654,7 @@ class SessionManager:
             elif getattr(self, "_pending_push", False):
                 self.rollback_last_push()
                 self._pending_push = False
-            if isinstance(e, ConcurrencyConflictError):
+            if isinstance(e, (ConcurrencyConflictError, RecoveryRequiredError)):
                 raise
             sys.stderr.write(f"Error: Failed to persist session state to '{self.session_path}': {e}\n")
             raise RuntimeError(f"Session persistence failed: {e}") from e

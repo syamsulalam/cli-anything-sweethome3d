@@ -14,7 +14,7 @@ from cli_anything.sweethome3d.core.opening import Opening
 from cli_anything.sweethome3d.core.furniture import Furniture, FURNITURE_CATALOG
 from cli_anything.sweethome3d.core.dimension import DimensionLine
 from cli_anything.sweethome3d.core.project import HomeModel
-from cli_anything.sweethome3d.core.session import SessionManager, _locked_save_json, ConcurrencyConflictError
+from cli_anything.sweethome3d.core.session import SessionManager, _locked_save_json, ConcurrencyConflictError, RecoveryRequiredError
 from cli_anything.sweethome3d.core.export import export_html, export_svg, calculate_bounds
 
 def test_wall_properties():
@@ -958,6 +958,109 @@ def test_cli_wall_add_duplicate_rejection_preserves_undo_redo_history():
             assert "w2" in cli_mod.session_mgr.model.walls
         finally:
             cli_mod.session_mgr = orig_session_mgr
+
+def test_pre_publication_crash_with_existing_target():
+    import subprocess
+    import sys
+    child = r'''
+import os, sys
+sys.path.insert(0, r"C:\Users\THINKPAD\Documents\GitHub\cli-anything-sweethome3d")
+from cli_anything.sweethome3d.core.session import SessionManager
+state, target = sys.argv[1:]
+m = SessionManager(state)
+m.push_state()
+m.model.name = "candidate"
+replace = os.replace
+def exit_before_artifact(src, dst):
+    if str(dst) == target:
+        os._exit(71)
+    return replace(src, dst)
+os.replace = exit_before_artifact
+m.save_file(target)
+'''
+    with tempfile.TemporaryDirectory() as td:
+        state = str(Path(td) / "session.json")
+        target = str(Path(td) / "home.json")
+        m = SessionManager(state)
+        m.new_project("base")
+        m.save_file(target)
+        env = os.environ.copy()
+        env.update(PYTHONPATH=r"C:\Users\THINKPAD\Documents\GitHub\cli-anything-sweethome3d",
+                   PYTHONDONTWRITEBYTECODE="1", USERPROFILE=td, HOME=td)
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", child, state, target],
+            env=env, capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 71, f"Child stderr: {result.stderr}"
+        assert Path(state + ".pending").exists()
+        recovered = SessionManager(state)
+        assert recovered.model.name == "candidate"
+        assert json.loads(Path(target).read_text())["name"] == "candidate"
+        assert not Path(state + ".pending").exists()
+
+def test_pre_publication_crash_with_absent_target():
+    import subprocess
+    import sys
+    child = r'''
+import os, sys
+sys.path.insert(0, r"C:\Users\THINKPAD\Documents\GitHub\cli-anything-sweethome3d")
+from cli_anything.sweethome3d.core.session import SessionManager
+state, target = sys.argv[1:]
+m = SessionManager(state)
+m.push_state()
+m.model.name = "candidate"
+replace = os.replace
+def exit_before_artifact(src, dst):
+    if str(dst) == target:
+        os._exit(71)
+    return replace(src, dst)
+os.replace = exit_before_artifact
+m.save_file(target)
+'''
+    with tempfile.TemporaryDirectory() as td:
+        state = str(Path(td) / "session.json")
+        target = str(Path(td) / "home_absent.json")
+        m = SessionManager(state)
+        m.new_project("base")
+        env = os.environ.copy()
+        env.update(PYTHONPATH=r"C:\Users\THINKPAD\Documents\GitHub\cli-anything-sweethome3d",
+                   PYTHONDONTWRITEBYTECODE="1", USERPROFILE=td, HOME=td)
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", child, state, target],
+            env=env, capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 71, f"Child stderr: {result.stderr}"
+        assert Path(state + ".pending").exists()
+        recovered = SessionManager(state)
+        assert recovered.model.name == "candidate"
+        assert Path(target).exists()
+        assert json.loads(Path(target).read_text())["name"] == "candidate"
+        assert not Path(state + ".pending").exists()
+
+def test_unresolved_recovery_blocks_subsequent_writes():
+    with tempfile.TemporaryDirectory() as td:
+        state = str(Path(td) / "session.json")
+        m = SessionManager(state)
+        m.new_project("base")
+        m.save_session()
+        
+        # Plant corrupt journal
+        pending_file = state + ".pending"
+        with open(pending_file, "w", encoding="utf-8") as f:
+            f.write("{corrupt: not_json_data")
+            
+        m2 = SessionManager(state)
+        # Attempting to save new state while recovery is unresolved must raise RecoveryRequiredError!
+        with pytest.raises(RecoveryRequiredError):
+            m2.new_project("unrelated")
+            m2.save_session()
+            
+        # Verify pending journal is still preserved
+        assert os.path.exists(pending_file)
+        # Verify session state was not overwritten
+        disk_data = json.loads(Path(state).read_text())
+        assert disk_data["model"]["name"] == "base"
+
 
 
 
