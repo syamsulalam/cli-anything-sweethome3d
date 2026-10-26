@@ -308,6 +308,45 @@ def compute_wall_analytic_stations(walls):
                         s2 = u_c * g2["len"]
                         stations_by_wall[w1.id].append({"station_cm": s1, "point": (ix, iy), "kind": "line_line", "peer_id": w2.id})
                         stations_by_wall[w2.id].append({"station_cm": s2, "point": (ix, iy), "kind": "line_line", "peer_id": w1.id})
+                else:
+                    # Parallel or collinear check
+                    dx1 = x2 - x1
+                    dy1 = y2 - y1
+                    L1 = g1["len"]
+                    u1x, u1y = dx1 / L1, dy1 / L1
+                    dist_to_line = abs((x3 - x1) * u1y - (y3 - y1) * u1x)
+                    if dist_to_line < 1e-4:
+                        # Collinear! Project w2 endpoints onto w1
+                        s_b1 = (x3 - x1) * u1x + (y3 - y1) * u1y
+                        s_b2 = (x4 - x1) * u1x + (y4 - y1) * u1y
+                        min_b, max_b = min(s_b1, s_b2), max(s_b1, s_b2)
+                        overlap_start = max(0.0, min_b)
+                        overlap_end = min(L1, max_b)
+                        if overlap_end - overlap_start > 1e-4:
+                            for s in (overlap_start, overlap_end):
+                                pt = (x1 + s * u1x, y1 + s * u1y)
+                                stations_by_wall[w1.id].append({
+                                    "station_cm": s, "point": pt,
+                                    "kind": "collinear_overlap", "peer_id": w2.id
+                                })
+
+                        # Project w1 endpoints onto w2
+                        dx2 = x4 - x3
+                        dy2 = y4 - y3
+                        L2 = g2["len"]
+                        u2x, u2y = dx2 / L2, dy2 / L2
+                        s_a1 = (x1 - x3) * u2x + (y1 - y3) * u2y
+                        s_a2 = (x2 - x3) * u2x + (y2 - y3) * u2y
+                        min_a, max_a = min(s_a1, s_a2), max(s_a1, s_a2)
+                        overlap_start_2 = max(0.0, min_a)
+                        overlap_end_2 = min(L2, max_a)
+                        if overlap_end_2 - overlap_start_2 > 1e-4:
+                            for s in (overlap_start_2, overlap_end_2):
+                                pt = (x3 + s * u2x, y3 + s * u2y)
+                                stations_by_wall[w2.id].append({
+                                    "station_cm": s, "point": pt,
+                                    "kind": "collinear_overlap", "peer_id": w1.id
+                                })
 
             elif not g1["curved"] and g2["curved"]:
                 # Line-arc intersection

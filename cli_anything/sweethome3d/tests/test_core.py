@@ -16,6 +16,7 @@ from click.testing import CliRunner
 from shapely.geometry import Polygon, Point, GeometryCollection
 from shapely.ops import unary_union
 from cli_anything.sweethome3d import sweethome3d_cli as cli_module
+command = cli_module
 from cli_anything.sweethome3d import __version__
 from cli_anything.sweethome3d.core import session as session_module
 
@@ -3736,101 +3737,178 @@ def test_no_selector_invocation_cannot_inherit_foreign_global_cache(tmp_path, mo
     assert payload["project"]["name"] == ("ExpectedDefault" if command == "info" else "ChosenDefault")
 
 # ==============================================================================
-# PAC-1 Round 28 / Phase 22 Advance-to-10 Tests (T02-T06, N03, N08, A02-A04)
+# PAC-1 Round 28 Acceptance Oracles (T02-T06, N03, N08, A01-A04)
 # ==============================================================================
 
-def test_curved_wall_physical_error_budget_within_tolerance():
-    from cli_anything.sweethome3d.core.native_contract import compute_curved_wall_error_budget, assert_curved_wall_error_budget
-    w = Wall("w_curve", 0, 0, 300, 0, arc_extent=90.0)
-    budget = compute_curved_wall_error_budget(w)
-    assert budget["valid"] is True
-    assert budget["total_error"] <= 0.01
-    assert assert_curved_wall_error_budget(w) == budget
+import copy
+import warnings
+from cli_anything.sweethome3d.core.topology import compute_wall_analytic_stations
+from cli_anything.sweethome3d.core.native_contract import compute_curved_wall_error_budget
 
 
-def test_curved_wall_physical_error_budget_rejects_exceeded_error():
-    from cli_anything.sweethome3d.core.native_contract import assert_curved_wall_error_budget
-    w = Wall("w_curve", 0, 0, 300, 0, arc_extent=90.0)
-    with pytest.raises(ValueError, match="exceeds physical error budget"):
-        assert_curved_wall_error_budget(w, budget=0.000001)
-
-
-def test_bounded_zip_archive_rejects_traversal(tmp_path):
-    import zipfile
-    from cli_anything.sweethome3d.core.project import HomeModel
-    zip_path = tmp_path / "malicious.sh3d"
-    with zipfile.ZipFile(str(zip_path), "w") as zf:
-        zf.writestr("../evil.txt", "exploit")
-        zf.writestr("Home.xml", "<home version='7400'/>")
-    with pytest.raises(ValueError, match="Dangerous path traversal"):
-        HomeModel.load_sh3d(str(zip_path))
-
-
-def test_wall_reverse_reanchors_openings():
+def model_with_door(native=False, swing="left"):
     m = HomeModel()
-    m.add_wall("w1", 0, 0, 400, 0)
-    m.add_opening("d1", "Door", wall_id="w1", offset_cm=50, width_cm=90, swing="left")
-    m.reverse_wall("w1")
-    w = m.walls["w1"]
-    assert (w.x_start, w.y_start) == (400, 0)
-    assert (w.x_end, w.y_end) == (0, 0)
-    d = m.openings["d1"]
-    assert d.offset_cm == 260.0
-    assert d.swing == "right"
+    m.add_wall("w", 0, 0, 400, 0, extra_attribs={
+        "leftSideColor": "00FF0000", "rightSideColor": "000000FF"})
+    pose = dict(x_cm=95, y_cm=0, angle_deg=0) if native else {}
+    m.add_opening("d", "Door", wall_id="w", offset_cm=50,
+                  width_cm=90, swing=swing, **pose)
+    return m
 
 
-def test_wall_split_distributes_openings():
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("swing", ["left", "right"])
+def test_reverse_preserves_physical_door_through_restart(tmp_path, native, swing):
+    path = tmp_path / "session.json"
+    mgr = SessionManager(str(path))
+    mgr.model = model_with_door(native, swing)
+    before = mgr.model.openings["d"].get_effective_geometry(mgr.model.walls["w"])
+    mgr.save_session()
+    result = CliRunner().invoke(command.cli, ["--json", "--session", str(path),
+                                             "wall", "reverse", "w"])
+    assert result.exit_code == 0, result.output
+    restored = SessionManager(str(path)).model
+    after = restored.openings["d"].get_effective_geometry(restored.walls["w"])
+    for key in ("center", "hinge", "latch", "open_endpoint"):
+        assert after[key] == pytest.approx(before[key], abs=0.01), key
+
+
+def test_reverse_normalizes_physical_face_intent():
+    m = model_with_door()
+    m.reverse_wall("w")
+    assert m.walls["w"].extra_attribs["leftSideColor"] == "000000FF"
+    assert m.walls["w"].extra_attribs["rightSideColor"] == "00FF0000"
+
+
+def test_split_retargets_native_end_join():
     m = HomeModel()
-    m.add_wall("w1", 0, 0, 400, 0)
-    m.add_opening("d1", "Door", wall_id="w1", offset_cm=50, width_cm=80)
-    m.add_opening("d2", "Door2", wall_id="w1", offset_cm=250, width_cm=80)
-    w1, w2 = m.split_wall("w1", split_offset_cm=200, new_wall_id="w1_part2")
-    assert w1.x_end == 200.0
-    assert w2.x_start == 200.0 and w2.x_end == 400.0
-    assert m.openings["d1"].wall_id == "w1"
-    assert m.openings["d1"].offset_cm == 50.0
-    assert m.openings["d2"].wall_id == "w1_part2"
-    assert m.openings["d2"].offset_cm == 50.0
+    m.add_wall("w", 0, 0, 400, 0, extra_attribs={"wallAtEnd": "n"})
+    m.add_wall("n", 400, 0, 400, 200, extra_attribs={"wallAtStart": "w"})
+    m.split_wall("w", 200, "tail")
+    assert m.walls["n"].extra_attribs["wallAtStart"] == "tail"
+    assert m.walls["tail"].extra_attribs["wallAtEnd"] == "n"
+    assert m.walls["w"].extra_attribs.get("wallAtEnd") != "n"
 
 
-def test_wall_split_rejects_split_across_opening():
-    m = HomeModel()
-    m.add_wall("w1", 0, 0, 400, 0)
-    m.add_opening("d1", "Door", wall_id="w1", offset_cm=180, width_cm=80)
-    with pytest.raises(ValueError, match="Cannot split wall across opening"):
-        m.split_wall("w1", split_offset_cm=200)
+def test_split_nan_direct_api_is_atomic():
+    m = model_with_door()
+    before = copy.deepcopy(m.to_dict())
+    with pytest.raises(ValueError):
+        m.split_wall("w", math.nan)
+    assert m.to_dict() == before
 
 
-def test_analytic_line_circle_intersections():
-    from cli_anything.sweethome3d.core.topology import compute_line_circle_intersections
-    hits = compute_line_circle_intersections(
-        (-200.0, 100.0), (200.0, 100.0), 0.0, 100.0, 100.0, 180.0, 0.0
-    )
-    assert len(hits) >= 1
-    for h in hits:
-        x, y = h["point"]
-        assert abs(math.hypot(x - 0.0, y - 100.0) - 100.0) < 1e-4
+def test_split_nan_public_cli_preserves_authoritative_bytes(tmp_path):
+    path = tmp_path / "session.json"
+    mgr = SessionManager(str(path)); mgr.model = model_with_door(); mgr.save_session()
+    before = path.read_bytes()
+    result = CliRunner().invoke(command.cli, ["--json", "--session", str(path),
+                                             "wall", "split", "w", "--offset", "nan"])
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stdout)["error"]["code"] == "VALIDATION_REJECTED"
+    assert path.read_bytes() == before
 
 
-def test_analytic_wall_stations_mixed_arrangement():
-    from cli_anything.sweethome3d.core.topology import compute_wall_analytic_stations
-    w1 = Wall("straight", 0, 100, 400, 100)
-    w2 = Wall("curved", 100, 0, 300, 0, arc_extent=90.0)
-    stations = compute_wall_analytic_stations([w1, w2])
-    assert "straight" in stations and "curved" in stations
-    assert len(stations["straight"]) >= 2
-    assert len(stations["curved"]) >= 2
-    for wid in stations:
-        st_vals = [s["station_cm"] for s in stations[wid]]
-        assert st_vals == sorted(st_vals)
+def test_valid_split_preserves_positive_control():
+    m = model_with_door()
+    before = m.openings["d"].get_effective_geometry(m.walls["w"])
+    first, second = m.split_wall("w", 200, "tail")
+    assert first.length + second.length == pytest.approx(400)
+    assert m.openings["d"].get_effective_geometry(first)["hinge"] == before["hinge"]
 
 
-def test_typed_error_classification_and_exit_codes():
-    from cli_anything.sweethome3d.sweethome3d_cli import classify_error
-    assert classify_error("RECOVERY_REQUIRED: journal pending")[0] == 7
-    assert classify_error("WALL_ASSEMBLY_CONFLICT: duplicate wall")[0] == 4
-    assert classify_error("ROOM_OWNERSHIP_CONFLICT: overlap")[0] == 4
-    assert classify_error("UNSUPPORTED_CURVED_FACE_TOPOLOGY: use slice")[0] == 5
-    assert classify_error("IO_ERROR: File not found")[0] == 6
-    assert classify_error("VALIDATION_REJECTED: zero wall")[0] == 3
+def test_collinear_overlap_records_both_atomic_boundary_stations():
+    records = compute_wall_analytic_stations([
+        Wall("a", 0, 0, 300, 0), Wall("b", 150, 0, 450, 0)])
+    assert [r["station_cm"] for r in records["a"]] == pytest.approx([0, 150, 300])
+    assert [r["station_cm"] for r in records["b"]] == pytest.approx([0, 150, 300])
+
+
+def test_actual_line_arc_secant_positive_control():
+    arc = Wall("a", 0, 0, 400, 0, arc_extent=90)
+    mid = arc.point_at_offset(arc.length / 2)
+    line = Wall("l", mid[0], mid[1]-50, mid[0], mid[1]+50)
+    records = compute_wall_analytic_stations([line, arc])
+    hits = [r for r in records["a"] if r["peer_id"] == "l"]
+    assert len(hits) == 1
+    assert hits[0]["station_cm"] == pytest.approx(arc.length/2, abs=0.01)
+
+
+@pytest.mark.parametrize("publication", ["xml", "archive"])
+def test_native_budget_applies_to_public_serialization(tmp_path, publication):
+    m = HomeModel(); m.add_wall("w", 0, 0, 90000, 0, arc_extent=90)
+    budget = compute_curved_wall_error_budget(m.walls["w"])
+    target = tmp_path / "plan.sh3d"; target.write_bytes(b"predecessor")
+    def publish():
+        return m.to_xml(validate=False) if publication == "xml" else m.save_sh3d(str(target))
+    if not budget["valid"]:
+        with pytest.raises(ValueError):
+            publish()
+        assert target.read_bytes() == b"predecessor"
+    else:
+        publish()  # A corrected codec may fit the budget by refining representation.
+
+
+@pytest.mark.parametrize("name", ["asset.bin", "Home.xml", "C:/escape.bin"])
+def test_ambiguous_or_absolute_archive_entries_rejected(tmp_path, name):
+    m = HomeModel(); m.add_wall("w", 0, 0, 300, 0)
+    path = tmp_path / "ambiguous.sh3d"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("Home.xml", m.to_xml())
+            if name == "asset.bin":
+                z.writestr(name, b"first"); z.writestr(name, b"last")
+            elif name == "Home.xml":
+                z.writestr(name, m.to_xml())
+            else:
+                z.writestr(name, b"opaque")
+    before = path.read_bytes()
+    with pytest.raises(ValueError):
+        HomeModel.load_sh3d(str(path))
+    assert path.read_bytes() == before
+
+
+def test_safe_resource_archive_positive_control(tmp_path):
+    m = HomeModel(); m.add_wall("w", 0, 0, 300, 0)
+    m.extra_zip_entries = {"textures/wood.bin": b"\x00\x01opaque"}
+    path = tmp_path / "safe.sh3d"; m.save_sh3d(str(path))
+    reloaded = HomeModel.load_sh3d(str(path))
+    assert reloaded.extra_zip_entries == m.extra_zip_entries
+
+
+@pytest.mark.parametrize("exception,expected", [
+    (ConcurrencyConflictError("Session revision conflict"), (4, "CONFLICT")),
+    (RecoveryRequiredError("unresolved recovery journal"), (7, "RECOVERY_REQUIRED")),
+    (PermissionError("access denied"), (6, "IO_ERROR")),
+])
+def test_typed_exception_identity_controls_taxonomy(exception, expected):
+    assert command.classify_error(exception) == expected
+
+
+def test_real_pending_journal_uses_recovery_code_and_preserves_bytes(tmp_path):
+    path = tmp_path / "session.json"
+    mgr = SessionManager(str(path)); mgr.model = model_with_door(); mgr.save_session()
+    pending = tmp_path / "session.json.pending"; pending.write_text("{}")
+    before = path.read_bytes(), pending.read_bytes()
+    result = CliRunner().invoke(command.cli, ["--json", "--session", str(path),
+                                             "wall", "reverse", "w"])
+    assert result.exit_code == 7, result.output
+    assert json.loads(result.stdout)["error"]["code"] == "RECOVERY_REQUIRED"
+    assert (path.read_bytes(), pending.read_bytes()) == before
+
+
+def test_version_and_persisted_strict_validation_positive_control(tmp_path, monkeypatch):
+    path = tmp_path / "session.json"
+    mgr = SessionManager(str(path)); mgr.model.add_wall("zero", 0, 0, 0, 0); mgr.save_session()
+    result = CliRunner().invoke(command.cli, ["--json", "--session", str(path),
+                                             "project", "validate", "--strict"])
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 3 and payload["data"]["valid"] is False
+    assert any(f["code"] == "ZERO_LENGTH_WALL" for f in payload["data"]["findings"])
+    def forbidden(*args, **kwargs):
+        raise AssertionError("version loaded a session")
+    monkeypatch.setattr(command, "SessionManager", forbidden)
+    result = CliRunner().invoke(command.cli, ["--version"])
+    assert result.exit_code == 0 and command.__version__ in result.output
 

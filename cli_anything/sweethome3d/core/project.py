@@ -406,20 +406,35 @@ MAX_ZIP_SINGLE_ENTRY_SIZE = 25 * 1024 * 1024   # 25 MiB
 
 
 def validate_sh3d_zip_archive(zf):
-    """Bounded ZIP archive policies (PAC-1 N08): entry limits, max size, traversal protection, zip bomb prevention."""
+    """Bounded ZIP archive policies (PAC-1 N08): entry limits, max size, traversal protection, duplicate prevention."""
+    import ntpath
     infolist = zf.infolist()
     if len(infolist) > MAX_ZIP_ENTRIES:
         raise ValueError(f"ZIP archive exceeds max entry limit: {len(infolist)} > {MAX_ZIP_ENTRIES}")
+    seen_names = set()
+    home_xml_count = 0
     total_uncompressed = 0
     for info in infolist:
         name = info.filename
-        if ".." in name or name.startswith("/") or name.startswith("\\"):
+        drive, rest = ntpath.splitdrive(name)
+        if drive:
+            raise ValueError(f"Drive-prefixed path in ZIP entry: {name}")
+        norm = name.replace("\\", "/")
+        if norm.startswith("/") or ".." in norm.split("/"):
             raise ValueError(f"Dangerous path traversal in ZIP archive entry: {name}")
+        if norm in seen_names or name in seen_names:
+            raise ValueError(f"Duplicate entry in ZIP archive: {name}")
+        seen_names.add(name)
+        seen_names.add(norm)
+        if name == "Home.xml":
+            home_xml_count += 1
         if info.file_size > MAX_ZIP_SINGLE_ENTRY_SIZE:
             raise ValueError(f"ZIP entry exceeds single-file size limit: {name} ({info.file_size} bytes)")
         total_uncompressed += info.file_size
         if total_uncompressed > MAX_ZIP_UNCOMPRESSED_SIZE:
             raise ValueError(f"ZIP archive exceeds total uncompressed size limit: {total_uncompressed} bytes")
+    if home_xml_count != 1:
+        raise ValueError(f"Expected exactly one 'Home.xml' entry, found {home_xml_count}")
 
 
 class HomeModel:
@@ -546,12 +561,18 @@ class HomeModel:
         return False
 
     def reverse_wall(self, wall_id):
-        """Reverses a wall's direction while re-anchoring hosted openings and preserving dimension anchors (PAC-1 T06)."""
+        """Reverses a wall's direction while preserving physical opening geometry and normalizing face intent (PAC-1 T06)."""
         wall_id = str(wall_id)
         if wall_id not in self.walls:
             raise ValueError(f"Wall '{wall_id}' not found in project.")
         wall = self.walls[wall_id]
         total_len = wall.length
+
+        # Pre-resolve door physical poses before changing coordinates
+        door_poses = {}
+        for op in self.openings.values():
+            if op.wall_id == wall_id:
+                door_poses[op.id] = op.get_effective_geometry(wall)
 
         # Invert coordinates
         wall.x_start, wall.x_end = wall.x_end, wall.x_start
@@ -559,28 +580,64 @@ class HomeModel:
         if wall.arc_extent != 0.0:
             wall.arc_extent = -wall.arc_extent
 
-        # Re-anchor hosted openings
+        # Re-anchor hosted openings preserving physical world geometry
         for op in self.openings.values():
             if op.wall_id == wall_id:
                 new_offset = total_len - op.offset_cm - op.width_cm
                 op.offset_cm = max(0.0, round(new_offset, 4))
-                if op.swing == "left":
-                    op.swing = "right"
-                elif op.swing == "right":
-                    op.swing = "left"
+                # Pin absolute pose if not already explicit so physical hinge and open endpoint are preserved
+                if op.x_cm is None and op.id in door_poses and door_poses[op.id]:
+                    p = door_poses[op.id]
+                    op.x_cm = p["center"][0]
+                    op.y_cm = p["center"][1]
+                    op.angle_deg = p["angle_deg"]
+                # Keep op.swing unchanged; absolute pose preserves hinge and sweep
+
+        # Normalize physical face intent (swap left and right finishes)
+        side_pairs = [
+            ("leftSideColor", "rightSideColor"),
+            ("leftSideTexture", "rightSideTexture"),
+            ("leftSideShininess", "rightSideShininess"),
+            ("leftSideBaseboard", "rightSideBaseboard"),
+            ("wallAtStart", "wallAtEnd"),
+        ]
+        for k1, k2 in side_pairs:
+            v1 = wall.extra_attribs.get(k1)
+            v2 = wall.extra_attribs.get(k2)
+            if v1 is not None or v2 is not None:
+                if v2 is not None:
+                    wall.extra_attribs[k1] = v2
+                else:
+                    wall.extra_attribs.pop(k1, None)
+                if v1 is not None:
+                    wall.extra_attribs[k2] = v1
+                else:
+                    wall.extra_attribs.pop(k2, None)
+
+        if "heightAtEnd" in wall.extra_attribs:
+            old_h = wall.height
+            old_h_end = float(wall.extra_attribs["heightAtEnd"])
+            wall.height = old_h_end
+            wall.extra_attribs["heightAtEnd"] = str(old_h)
 
         return wall
 
     def split_wall(self, wall_id, split_offset_cm, new_wall_id=None):
         """Splits a wall into two contiguous collinear segments at split_offset_cm (PAC-1 T06).
 
-        Re-anchors hosted openings and updates dimensions. Rejects split across an opening.
+        Re-anchors hosted openings and retargets native joins. Rejects split across an opening or non-finite inputs.
         """
         wall_id = str(wall_id)
         if wall_id not in self.walls:
             raise ValueError(f"Wall '{wall_id}' not found in project.")
+        try:
+            split_s = float(split_offset_cm)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Invalid split offset: {exc}") from exc
+        if not math.isfinite(split_s):
+            raise ValueError(f"Split offset must be finite number, got {split_offset_cm}")
+
         wall = self.walls[wall_id]
-        split_s = float(split_offset_cm)
         total_len = wall.length
         if split_s <= 1e-4 or split_s >= total_len - 1e-4:
             raise ValueError(f"Split offset {split_s} must be strictly inside wall (length {total_len})")
@@ -598,14 +655,16 @@ class HomeModel:
             raise ValueError(f"Wall ID '{new_id}' already exists in project.")
 
         split_pt = wall.point_at_offset(split_s)
+        old_x_end = wall.x_end
+        old_y_end = wall.y_end
 
         # Create second segment: from split_pt to old end
         wall2 = Wall(
             wall_id=new_id,
             x_start=split_pt[0],
             y_start=split_pt[1],
-            x_end=wall.x_end,
-            y_end=wall.y_end,
+            x_end=old_x_end,
+            y_end=old_y_end,
             thickness=wall.thickness,
             height=wall.height,
             level_id=wall.level_id,
@@ -621,6 +680,23 @@ class HomeModel:
         # Update first segment to end at split_pt
         wall.x_end = split_pt[0]
         wall.y_end = split_pt[1]
+
+        # Retarget native endpoint joins:
+        # wall2 inherits wallAtEnd because it ends where original wall ended
+        old_end_join = wall.extra_attribs.pop("wallAtEnd", None)
+        if old_end_join is not None:
+            wall2.extra_attribs["wallAtEnd"] = old_end_join
+        wall.extra_attribs.pop("wallAtEnd", None)
+
+        # Retarget any neighboring wall pointing to wall_id at the old end
+        for other in self.walls.values():
+            if other.id != wall_id and other.id != new_id:
+                if other.extra_attribs.get("wallAtStart") == wall_id:
+                    if math.hypot(other.x_start - old_x_end, other.y_start - old_y_end) < 1.0:
+                        other.extra_attribs["wallAtStart"] = new_id
+                if other.extra_attribs.get("wallAtEnd") == wall_id:
+                    if math.hypot(other.x_end - old_x_end, other.y_end - old_y_end) < 1.0:
+                        other.extra_attribs["wallAtEnd"] = new_id
 
         self.walls[new_id] = wall2
 

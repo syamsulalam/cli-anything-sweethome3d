@@ -200,6 +200,8 @@ def assert_native_model_domain(model):
         check(wall.thickness)
         check(wall.height)
         check(wall.arc_extent, angle=True)
+        if abs(wall.arc_extent) >= 1e-4:
+            assert_curved_wall_error_budget(wall)
     for room in model.rooms.values():
         for ring in [room.points] + list(room.holes or []):
             for point in ring:

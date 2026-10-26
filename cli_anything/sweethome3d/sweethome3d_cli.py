@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import json
@@ -19,6 +20,7 @@ from cli_anything.sweethome3d.utils.repl_skin import ReplSkin
 from cli_anything.sweethome3d.utils.sweethome3d_backend import find_sweethome3d, launch_gui, get_install_instructions
 from cli_anything.sweethome3d import __version__
 from cli_anything.sweethome3d.core import session as session_module
+from cli_anything.sweethome3d.core.session import RecoveryRequiredError, ConcurrencyConflictError
 from cli_anything.sweethome3d.core.invocation import resolve_invocation
 
 SESSION_FILE = getattr(session_module, "SESSION_FILE", os.path.expanduser("~/.cli_anything_sweethome3d_session.json"))
@@ -225,17 +227,33 @@ def output_result(ctx, data, human_formatter=None, include_project=True):
         skin.success(str(data))
 
 def classify_error(exc_or_msg):
-    """Maps errors to PAC-1 typed exit codes and machine-readable error codes (PAC-1 A04)."""
+    """Maps errors to PAC-1 typed exit codes and machine-readable error codes (PAC-1 A04, R28-P1-05)."""
+    if isinstance(exc_or_msg, BaseException):
+        chain, seen = [], set()
+        curr = exc_or_msg
+        while isinstance(curr, BaseException) and id(curr) not in seen:
+            seen.add(id(curr))
+            chain.append(curr)
+            curr = getattr(curr, "__cause__", None) or getattr(curr, "__context__", None)
+        for typ, result in (
+            (RecoveryRequiredError, (7, "RECOVERY_REQUIRED")),
+            (ConcurrencyConflictError, (4, "CONFLICT")),
+            (OSError, (6, "IO_ERROR")),
+            (ValueError, (3, "VALIDATION_REJECTED")),
+        ):
+            if any(isinstance(item, typ) for item in chain):
+                return result
+
     msg = str(exc_or_msg)
-    if "RECOVERY_REQUIRED" in msg:
+    if "unresolved recovery journal" in msg or "RECOVERY_REQUIRED" in msg:
         return 7, "RECOVERY_REQUIRED"
-    if "CONFLICT" in msg or "Duplicate" in msg or "already exists" in msg:
+    if "conflict" in msg.lower() or "CONFLICT" in msg or "Duplicate" in msg or "already exists" in msg:
         return 4, "CONFLICT"
-    if "IO_ERROR" in msg or "not found" in msg or "No such file" in msg:
+    if "access denied" in msg.lower() or "not found" in msg.lower() or "No such file" in msg or "IO_ERROR" in msg:
         return 6, "IO_ERROR"
-    if "UNSUPPORTED" in msg or "Unsupported" in msg:
+    if "unsupported" in msg.lower() or "UNSUPPORTED" in msg:
         return 5, "UNSUPPORTED"
-    if "VALIDATION" in msg or "Invalid" in msg or "invalid" in msg or "Zero-length" in msg:
+    if "validation" in msg.lower() or "invalid" in msg.lower() or "zero" in msg.lower() or "finite" in msg.lower():
         return 3, "VALIDATION_REJECTED"
     return 1, "ERROR"
 
@@ -243,6 +261,7 @@ def output_error(ctx, message, code=1, error_code=None, data=None):
     """Outputs structured error either as JSON or human-readable format (PAC-1 A04, R17-P1-04, R18-P1-04, R25-A01)."""
     if code == 1 and error_code is None:
         code, error_code = classify_error(message)
+    msg_str = str(message)
     is_json = ctx.obj.get("json", False) if (ctx and ctx.obj) else False
     if is_json:
         payload = {
@@ -253,9 +272,9 @@ def output_error(ctx, message, code=1, error_code=None, data=None):
             "data": data,
             "error": {
                 "code": error_code or "ERROR",
-                "message": str(message)
+                "message": msg_str
             },
-            "message": str(message)
+            "message": msg_str
         }
         click.echo(json.dumps(payload, indent=2, allow_nan=False))
     else:
@@ -590,7 +609,7 @@ def wall_reverse(ctx, wall_id):
             session_mgr.save_session()
         output_result(ctx, {"reversed": wall_id, "wall": w.to_dict()})
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 @wall.command(name="split")
 @click.argument("wall_id")
@@ -600,13 +619,15 @@ def wall_reverse(ctx, wall_id):
 def wall_split(ctx, wall_id, split_offset_cm, new_wall_id):
     """Split a wall at offset into two contiguous segments (PAC-1 T06)."""
     try:
+        if not math.isfinite(split_offset_cm):
+            raise ValueError(f"Split offset must be finite, got {split_offset_cm}")
         with session_mgr.transaction():
             session_mgr.push_state()
             w1, w2 = session_mgr.model.split_wall(wall_id, split_offset_cm, new_wall_id=new_wall_id)
             session_mgr.save_session()
         output_result(ctx, {"split": wall_id, "segment1": w1.to_dict(), "segment2": w2.to_dict()})
     except Exception as e:
-        output_error(ctx, str(e))
+        output_error(ctx, e)
 
 
 @wall.command(name="node")
