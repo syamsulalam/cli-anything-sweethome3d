@@ -400,6 +400,28 @@ class Level:
             extra_children=d.get("extra_children"),
         )
 
+MAX_ZIP_ENTRIES = 10000
+MAX_ZIP_UNCOMPRESSED_SIZE = 100 * 1024 * 1024  # 100 MiB
+MAX_ZIP_SINGLE_ENTRY_SIZE = 25 * 1024 * 1024   # 25 MiB
+
+
+def validate_sh3d_zip_archive(zf):
+    """Bounded ZIP archive policies (PAC-1 N08): entry limits, max size, traversal protection, zip bomb prevention."""
+    infolist = zf.infolist()
+    if len(infolist) > MAX_ZIP_ENTRIES:
+        raise ValueError(f"ZIP archive exceeds max entry limit: {len(infolist)} > {MAX_ZIP_ENTRIES}")
+    total_uncompressed = 0
+    for info in infolist:
+        name = info.filename
+        if ".." in name or name.startswith("/") or name.startswith("\\"):
+            raise ValueError(f"Dangerous path traversal in ZIP archive entry: {name}")
+        if info.file_size > MAX_ZIP_SINGLE_ENTRY_SIZE:
+            raise ValueError(f"ZIP entry exceeds single-file size limit: {name} ({info.file_size} bytes)")
+        total_uncompressed += info.file_size
+        if total_uncompressed > MAX_ZIP_UNCOMPRESSED_SIZE:
+            raise ValueError(f"ZIP archive exceeds total uncompressed size limit: {total_uncompressed} bytes")
+
+
 class HomeModel:
     """Core in-memory representation of a Sweet Home 3D project."""
 
@@ -522,6 +544,94 @@ class HomeModel:
             del self.walls[wall_id]
             return True
         return False
+
+    def reverse_wall(self, wall_id):
+        """Reverses a wall's direction while re-anchoring hosted openings and preserving dimension anchors (PAC-1 T06)."""
+        wall_id = str(wall_id)
+        if wall_id not in self.walls:
+            raise ValueError(f"Wall '{wall_id}' not found in project.")
+        wall = self.walls[wall_id]
+        total_len = wall.length
+
+        # Invert coordinates
+        wall.x_start, wall.x_end = wall.x_end, wall.x_start
+        wall.y_start, wall.y_end = wall.y_end, wall.y_start
+        if wall.arc_extent != 0.0:
+            wall.arc_extent = -wall.arc_extent
+
+        # Re-anchor hosted openings
+        for op in self.openings.values():
+            if op.wall_id == wall_id:
+                new_offset = total_len - op.offset_cm - op.width_cm
+                op.offset_cm = max(0.0, round(new_offset, 4))
+                if op.swing == "left":
+                    op.swing = "right"
+                elif op.swing == "right":
+                    op.swing = "left"
+
+        return wall
+
+    def split_wall(self, wall_id, split_offset_cm, new_wall_id=None):
+        """Splits a wall into two contiguous collinear segments at split_offset_cm (PAC-1 T06).
+
+        Re-anchors hosted openings and updates dimensions. Rejects split across an opening.
+        """
+        wall_id = str(wall_id)
+        if wall_id not in self.walls:
+            raise ValueError(f"Wall '{wall_id}' not found in project.")
+        wall = self.walls[wall_id]
+        split_s = float(split_offset_cm)
+        total_len = wall.length
+        if split_s <= 1e-4 or split_s >= total_len - 1e-4:
+            raise ValueError(f"Split offset {split_s} must be strictly inside wall (length {total_len})")
+
+        # Check if split point falls inside any opening
+        for op in self.openings.values():
+            if op.wall_id == wall_id:
+                op_start = op.offset_cm
+                op_end = op.offset_cm + op.width_cm
+                if op_start < split_s < op_end:
+                    raise ValueError(f"Cannot split wall across opening '{op.id}' [{op_start}, {op_end}]")
+
+        new_id = str(new_wall_id or f"{wall_id}_seg2")
+        if new_id in self.walls:
+            raise ValueError(f"Wall ID '{new_id}' already exists in project.")
+
+        split_pt = wall.point_at_offset(split_s)
+
+        # Create second segment: from split_pt to old end
+        wall2 = Wall(
+            wall_id=new_id,
+            x_start=split_pt[0],
+            y_start=split_pt[1],
+            x_end=wall.x_end,
+            y_end=wall.y_end,
+            thickness=wall.thickness,
+            height=wall.height,
+            level_id=wall.level_id,
+            arc_extent=0.0,
+            extra_attribs=dict(wall.extra_attribs),
+            extra_children=list(wall.extra_children),
+        )
+        if wall.arc_extent != 0.0:
+            frac = (total_len - split_s) / total_len
+            wall2.arc_extent = wall.arc_extent * frac
+            wall.arc_extent = wall.arc_extent * (split_s / total_len)
+
+        # Update first segment to end at split_pt
+        wall.x_end = split_pt[0]
+        wall.y_end = split_pt[1]
+
+        self.walls[new_id] = wall2
+
+        # Re-assign openings beyond split point to wall2
+        for op in self.openings.values():
+            if op.wall_id == wall_id and op.offset_cm >= split_s:
+                op.wall_id = new_id
+                op.offset_cm = round(op.offset_cm - split_s, 4)
+
+        return wall, wall2
+
 
     # Room methods
     def add_room(self, room_id, name, points, level_id="level1", floor_color="#EAEAEA",
@@ -2388,6 +2498,7 @@ class HomeModel:
         extra_entries = {}
         xml_content = None
         with zipfile.ZipFile(filepath, "r") as zf:
+            validate_sh3d_zip_archive(zf)
             for item in zf.infolist():
                 if item.filename == "Home.xml":
                     xml_content = zf.read("Home.xml").decode("utf-8")

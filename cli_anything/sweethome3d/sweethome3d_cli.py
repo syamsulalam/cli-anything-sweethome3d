@@ -224,8 +224,25 @@ def output_result(ctx, data, human_formatter=None, include_project=True):
     else:
         skin.success(str(data))
 
+def classify_error(exc_or_msg):
+    """Maps errors to PAC-1 typed exit codes and machine-readable error codes (PAC-1 A04)."""
+    msg = str(exc_or_msg)
+    if "RECOVERY_REQUIRED" in msg:
+        return 7, "RECOVERY_REQUIRED"
+    if "CONFLICT" in msg or "Duplicate" in msg or "already exists" in msg:
+        return 4, "CONFLICT"
+    if "IO_ERROR" in msg or "not found" in msg or "No such file" in msg:
+        return 6, "IO_ERROR"
+    if "UNSUPPORTED" in msg or "Unsupported" in msg:
+        return 5, "UNSUPPORTED"
+    if "VALIDATION" in msg or "Invalid" in msg or "invalid" in msg or "Zero-length" in msg:
+        return 3, "VALIDATION_REJECTED"
+    return 1, "ERROR"
+
 def output_error(ctx, message, code=1, error_code=None, data=None):
     """Outputs structured error either as JSON or human-readable format (PAC-1 A04, R17-P1-04, R18-P1-04, R25-A01)."""
+    if code == 1 and error_code is None:
+        code, error_code = classify_error(message)
     is_json = ctx.obj.get("json", False) if (ctx and ctx.obj) else False
     if is_json:
         payload = {
@@ -284,6 +301,7 @@ class JsonEnvelopeGroup(click.Group):
             raise
 
 @click.group(cls=JsonEnvelopeGroup, invoke_without_command=True)
+@click.version_option(__version__, prog_name="cli-anything-sweethome3d")
 @click.option("--json", "json_mode", is_flag=True, help="Output machine-readable JSON.")
 @click.option("--project", "project_path", type=click.Path(file_okay=False), help="Workspace directory; state is .cli-anything/session.json.")
 @click.option("--session", "session_path", type=click.Path(dir_okay=False), help="Explicit authoritative session JSON file.")
@@ -559,6 +577,37 @@ def wall_remove(ctx, wall_id):
         output_result(ctx, {"removed": wall_id})
     except Exception as e:
         output_error(ctx, str(e))
+
+@wall.command(name="reverse")
+@click.argument("wall_id")
+@click.pass_context
+def wall_reverse(ctx, wall_id):
+    """Reverse a wall's direction and re-anchor hosted openings (PAC-1 T06)."""
+    try:
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            w = session_mgr.model.reverse_wall(wall_id)
+            session_mgr.save_session()
+        output_result(ctx, {"reversed": wall_id, "wall": w.to_dict()})
+    except Exception as e:
+        output_error(ctx, str(e))
+
+@wall.command(name="split")
+@click.argument("wall_id")
+@click.option("--offset", "split_offset_cm", type=float, required=True, help="Offset along wall in cm where split occurs.")
+@click.option("--new-id", "new_wall_id", default=None, help="ID for the second segment.")
+@click.pass_context
+def wall_split(ctx, wall_id, split_offset_cm, new_wall_id):
+    """Split a wall at offset into two contiguous segments (PAC-1 T06)."""
+    try:
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            w1, w2 = session_mgr.model.split_wall(wall_id, split_offset_cm, new_wall_id=new_wall_id)
+            session_mgr.save_session()
+        output_result(ctx, {"split": wall_id, "segment1": w1.to_dict(), "segment2": w2.to_dict()})
+    except Exception as e:
+        output_error(ctx, str(e))
+
 
 @wall.command(name="node")
 @click.option("--level", "level_id", default=None, help="Filter by level ID.")

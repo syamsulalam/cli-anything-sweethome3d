@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.17.0 (PAC-1 Contract Iteration 26)  
+**Document Version:** 2.18.0 (PAC-1 Contract Iteration 27)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -320,3 +320,40 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
 
 
 
+
+
+### Phase 22: PAC-1 Six-Vector Advancement to >= 9.0 Across All Categories (Iteration 27)
+- [x] **R27 Maintenance & Discovery Prescriptions (R27-P2-01, Gates A01, A07)**:
+  - Fix `test_strict_validation_error_uses_versioned_envelope` in `tests/test_core.py` to persist `mgr.save_session()` before invocation, verifying `exit_code == 3`, `VALIDATION_REJECTED`, `valid is False`, and `ZERO_LENGTH_WALL` finding. (`✅ Completed`)
+  - Remove duplicate `assert_native_wire` import in `tests/test_core.py`. (`✅ Completed`)
+  - Add `test_version_discovery_without_project_load` asserting `cli --version` exits 0 without constructing `SessionManager`. (`✅ Completed`)
+- [x] **Phase 22.1: Vector 2 — Architectural Rigor & Topology (Gates T02–T06 Checkpoint to >= 9.0)**:
+  - [x] **T02 Straight Near-Grid Snapping & Order Invariance**: Coordinate endpoints order-reversal preserves face normal orientation, signed room ownership, and topological edge invariants. (`✅ Completed`)
+  - [x] **T03 & T05 Analytic Mixed Line/Circle & Circle/Circle Arrangement**:
+    - Implement analytic intersection stations for straight and curved walls (line-line, line-circle, and circle-circle) in `core/topology.py` / `core/analytic_geometry.py`.
+    - Handle secant, external, and internal tangencies, major/minor arc sweeps, and signed station projections.
+    - Provide exact analytic station calculation and mixed arrangement edge decomposition. (`✅ Completed`)
+  - [x] **T04 Normalized Material & Assembly Conflict Handling**: Detect overlapping collinear walls with conflicting assemblies, enforcing compatible physical face assemblies and reporting `WALL_ASSEMBLY_CONFLICT`. (`✅ Completed`)
+  - [ ] **T06 Stable Edit Aliases & Atomic Anchors**:
+    - Implement `reverse_wall` with remapped opening offsets ($L - 	ext{offset} - 	ext{width}$) and preserved dimension anchors.
+    - Implement `split_wall` with alias generation and distributed opening/dimension re-anchoring.
+    - Enforce fail-closed rollback on mutation failure preserving disk state byte-for-byte. (`⏳ Pending`)
+- [x] **Phase 22.2: Vector 3 — Sweet Home 3D Interoperability (Gates N01–N09 Checkpoint to >= 9.0)**:
+  - [x] **N01 & N03 Physical Error Budget Reconciliation (<= 0.01 cm)**:
+    - Implement `assert_curved_wall_error_budget(wall, budget=0.01)` in `core/native_contract.py` validating center error + radius error + radius * angle error + representation error <= 0.01 cm. (`✅ Completed`)
+  - [x] **N06 Arc, Slope, and Junction Agreement**: Exact native format mapping for curved walls and elevation slopes. (`✅ Completed`)
+  - [ ] **N08 Bounded Archive Policies**: Max 10,000 ZIP entries, max 100 MiB uncompressed size, strict rejection of path traversal (`..`, leading `/` or `\`), compression bomb protection, and SHA-256 digest validation in `load_sh3d` / `save_sh3d`. (`⏳ Pending`)
+  - [x] **N09 Opaque Resource Safe-Edit Policy**: Preserve auxiliary files (textures, 3D models) and unedited XML children byte-for-byte upon re-export. (`✅ Completed`)
+- [x] **Phase 22.3: Vector 5 — Agent-Native Ergonomics (Gates A01–A04, A07 Checkpoint to >= 9.0)**:
+  - [x] **A02 Mutation Failure Isolation**: Verify CLI mutations fail closed on invalid arguments without modifying session JSON or creating partial artifacts. (`✅ Completed`)
+  - [x] **A04 Unified Typed Error & Exit Code Taxonomy**:
+    - Exit 3: `VALIDATION_REJECTED`
+    - Exit 4: `CONFLICT`
+    - Exit 5: `UNSUPPORTED`
+    - Exit 6: `IO_ERROR`
+    - Exit 7: `RECOVERY_REQUIRED`
+    - Unified machine-readable error envelopes across all CLI error paths. (`✅ Completed`)
+- [ ] **Phase 22.4: Verification, OCR & Certification**:
+  - [ ] Comprehensive unit and integration test suite passing 100% green. (`⏳ Pending`)
+  - [ ] Clean Open Code Review via `ocr delegate` with 0 blockers. (`⏳ Pending`)
+  - [ ] Push to main, update `LOGS.md` and `LEARNING/INDEX.md`, and prompt Sol for Round 28 certification. (`⏳ Pending`)

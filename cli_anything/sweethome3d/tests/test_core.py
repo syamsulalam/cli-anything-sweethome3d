@@ -28,7 +28,6 @@ from cli_anything.sweethome3d.core.project import HomeModel, _make_door_sector_p
 from cli_anything.sweethome3d.core.session import SessionManager, _locked_save_json, _calc_sha256, ConcurrencyConflictError, RecoveryRequiredError
 from cli_anything.sweethome3d.core.export import export_html, export_svg, export_dxf, calculate_bounds
 from cli_anything.sweethome3d.core.native_contract import assert_native_wire
-from cli_anything.sweethome3d.core.native_contract import assert_native_wire
 
 def test_wall_properties():
     # 6m wall horizontal
@@ -2673,16 +2672,32 @@ def test_preserved_native_camera_and_compass_precede_levels():
     assert tags.index('compass') < tags.index('observerCamera') < tags.index('level')
 
 
-def test_strict_validation_error_uses_versioned_envelope(tmp_path,monkeypatch):
-    mgr = SessionManager(str(tmp_path/'session.json'))
-    mgr.model.add_wall('zero',0,0,0,0)
-    monkeypatch.setattr(cli_module,'_session_mgr',mgr)
-    r = CliRunner().invoke(cli_module.cli,['--json','--session',str(tmp_path/'session.json'),'project','validate','--strict'])
-    assert r.exit_code != 0
-    p = json.loads(r.stdout)
-    assert p.get('protocol_version') == '1'
-    assert isinstance(p.get('error'),dict)
-    assert isinstance(p['error'].get('code'),str)
+def test_strict_validation_error_uses_versioned_envelope(tmp_path):
+    session = tmp_path / "session.json"
+    mgr = SessionManager(str(session))
+    mgr.model.add_wall("zero", 0, 0, 0, 0)
+    mgr.save_session()
+    result = CliRunner().invoke(
+        cli_module.cli,
+        ["--json", "--session", str(session), "project", "validate", "--strict"],
+    )
+    assert result.exit_code == 3
+    payload = json.loads(result.stdout)
+    assert payload["protocol_version"] == "1"
+    assert payload["status"] == "error"
+    assert payload["error"]["code"] == "VALIDATION_REJECTED"
+    assert payload["data"]["valid"] is False
+    assert any(f["code"] == "ZERO_LENGTH_WALL"
+               for f in payload["data"]["findings"])
+
+
+def test_version_discovery_without_project_load(monkeypatch):
+    def forbidden_manager(*args, **kwargs):
+        raise AssertionError("version discovery loaded a project")
+    monkeypatch.setattr(cli_module, "SessionManager", forbidden_manager)
+    result = CliRunner().invoke(cli_module.cli, ["--version"])
+    assert result.exit_code == 0
+    assert cli_module.__version__ in result.output
 
 
 def test_click_usage_error_uses_versioned_envelope(tmp_path,monkeypatch):
@@ -3719,4 +3734,103 @@ def test_no_selector_invocation_cannot_inherit_foreign_global_cache(tmp_path, mo
     assert foreign_path.read_bytes() == foreign_before
     assert payload["project"]["session_path"] == os.path.normcase(os.path.realpath(default_path))
     assert payload["project"]["name"] == ("ExpectedDefault" if command == "info" else "ChosenDefault")
+
+# ==============================================================================
+# PAC-1 Round 28 / Phase 22 Advance-to-10 Tests (T02-T06, N03, N08, A02-A04)
+# ==============================================================================
+
+def test_curved_wall_physical_error_budget_within_tolerance():
+    from cli_anything.sweethome3d.core.native_contract import compute_curved_wall_error_budget, assert_curved_wall_error_budget
+    w = Wall("w_curve", 0, 0, 300, 0, arc_extent=90.0)
+    budget = compute_curved_wall_error_budget(w)
+    assert budget["valid"] is True
+    assert budget["total_error"] <= 0.01
+    assert assert_curved_wall_error_budget(w) == budget
+
+
+def test_curved_wall_physical_error_budget_rejects_exceeded_error():
+    from cli_anything.sweethome3d.core.native_contract import assert_curved_wall_error_budget
+    w = Wall("w_curve", 0, 0, 300, 0, arc_extent=90.0)
+    with pytest.raises(ValueError, match="exceeds physical error budget"):
+        assert_curved_wall_error_budget(w, budget=0.000001)
+
+
+def test_bounded_zip_archive_rejects_traversal(tmp_path):
+    import zipfile
+    from cli_anything.sweethome3d.core.project import HomeModel
+    zip_path = tmp_path / "malicious.sh3d"
+    with zipfile.ZipFile(str(zip_path), "w") as zf:
+        zf.writestr("../evil.txt", "exploit")
+        zf.writestr("Home.xml", "<home version='7400'/>")
+    with pytest.raises(ValueError, match="Dangerous path traversal"):
+        HomeModel.load_sh3d(str(zip_path))
+
+
+def test_wall_reverse_reanchors_openings():
+    m = HomeModel()
+    m.add_wall("w1", 0, 0, 400, 0)
+    m.add_opening("d1", "Door", wall_id="w1", offset_cm=50, width_cm=90, swing="left")
+    m.reverse_wall("w1")
+    w = m.walls["w1"]
+    assert (w.x_start, w.y_start) == (400, 0)
+    assert (w.x_end, w.y_end) == (0, 0)
+    d = m.openings["d1"]
+    assert d.offset_cm == 260.0
+    assert d.swing == "right"
+
+
+def test_wall_split_distributes_openings():
+    m = HomeModel()
+    m.add_wall("w1", 0, 0, 400, 0)
+    m.add_opening("d1", "Door", wall_id="w1", offset_cm=50, width_cm=80)
+    m.add_opening("d2", "Door2", wall_id="w1", offset_cm=250, width_cm=80)
+    w1, w2 = m.split_wall("w1", split_offset_cm=200, new_wall_id="w1_part2")
+    assert w1.x_end == 200.0
+    assert w2.x_start == 200.0 and w2.x_end == 400.0
+    assert m.openings["d1"].wall_id == "w1"
+    assert m.openings["d1"].offset_cm == 50.0
+    assert m.openings["d2"].wall_id == "w1_part2"
+    assert m.openings["d2"].offset_cm == 50.0
+
+
+def test_wall_split_rejects_split_across_opening():
+    m = HomeModel()
+    m.add_wall("w1", 0, 0, 400, 0)
+    m.add_opening("d1", "Door", wall_id="w1", offset_cm=180, width_cm=80)
+    with pytest.raises(ValueError, match="Cannot split wall across opening"):
+        m.split_wall("w1", split_offset_cm=200)
+
+
+def test_analytic_line_circle_intersections():
+    from cli_anything.sweethome3d.core.topology import compute_line_circle_intersections
+    hits = compute_line_circle_intersections(
+        (-200.0, 100.0), (200.0, 100.0), 0.0, 100.0, 100.0, 180.0, 0.0
+    )
+    assert len(hits) >= 1
+    for h in hits:
+        x, y = h["point"]
+        assert abs(math.hypot(x - 0.0, y - 100.0) - 100.0) < 1e-4
+
+
+def test_analytic_wall_stations_mixed_arrangement():
+    from cli_anything.sweethome3d.core.topology import compute_wall_analytic_stations
+    w1 = Wall("straight", 0, 100, 400, 100)
+    w2 = Wall("curved", 100, 0, 300, 0, arc_extent=90.0)
+    stations = compute_wall_analytic_stations([w1, w2])
+    assert "straight" in stations and "curved" in stations
+    assert len(stations["straight"]) >= 2
+    assert len(stations["curved"]) >= 2
+    for wid in stations:
+        st_vals = [s["station_cm"] for s in stations[wid]]
+        assert st_vals == sorted(st_vals)
+
+
+def test_typed_error_classification_and_exit_codes():
+    from cli_anything.sweethome3d.sweethome3d_cli import classify_error
+    assert classify_error("RECOVERY_REQUIRED: journal pending")[0] == 7
+    assert classify_error("WALL_ASSEMBLY_CONFLICT: duplicate wall")[0] == 4
+    assert classify_error("ROOM_OWNERSHIP_CONFLICT: overlap")[0] == 4
+    assert classify_error("UNSUPPORTED_CURVED_FACE_TOPOLOGY: use slice")[0] == 5
+    assert classify_error("IO_ERROR: File not found")[0] == 6
+    assert classify_error("VALIDATION_REJECTED: zero wall")[0] == 3
 

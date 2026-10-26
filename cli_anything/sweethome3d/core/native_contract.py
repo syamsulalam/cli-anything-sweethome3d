@@ -227,3 +227,85 @@ def assert_native_model_domain(model):
                      "elevation_start_cm", "elevation_end_cm"):
             check(getattr(dimension, attr))
 
+def compute_curved_wall_error_budget(wall, steps=None) -> dict[str, float]:
+    """Computes the combined physical native-float/geometry error budget (PAC-1 N03).
+
+    Total physical error = center error + radius error + (radius * native-angle error) + representation error.
+    Enforces PAC-1 tolerance <= 0.01 cm.
+    """
+    if not math.isfinite(wall.arc_extent) or abs(wall.arc_extent) < 1e-4:
+        return {
+            "center_error": 0.0,
+            "radius_error": 0.0,
+            "angle_error": 0.0,
+            "rep_error": 0.0,
+            "total_error": 0.0,
+            "valid": True,
+        }
+    c = wall.chord_length
+    if c < 1e-6:
+        return {
+            "center_error": 0.0,
+            "radius_error": 0.0,
+            "angle_error": 0.0,
+            "rep_error": 0.0,
+            "total_error": 0.0,
+            "valid": True,
+        }
+    theta_rad = abs(math.radians(wall.arc_extent))
+    alpha = theta_rad / 2.0
+    sin_half = math.sin(alpha)
+    if abs(sin_half) < 1e-6:
+        return {
+            "center_error": 0.0,
+            "radius_error": 0.0,
+            "angle_error": 0.0,
+            "rep_error": 0.0,
+            "total_error": 0.0,
+            "valid": True,
+        }
+    R = c / (2.0 * sin_half)
+    h = R * math.cos(alpha)
+    mx = (wall.x_start + wall.x_end) / 2.0
+    my = (wall.y_start + wall.y_end) / 2.0
+    nx = -(wall.y_end - wall.y_start) / c
+    ny = (wall.x_end - wall.x_start) / c
+    sign = 1.0 if wall.arc_extent > 0 else -1.0
+    cx = mx - sign * h * nx
+    cy = my - sign * h * ny
+
+    # Float32 representation error
+    f32_cx = checked_native_float(cx, coordinate=True)
+    f32_cy = checked_native_float(cy, coordinate=True)
+    f32_r = checked_native_float(R)
+    f32_theta = checked_native_float(theta_rad)
+
+    e_center = math.hypot(f32_cx - cx, f32_cy - cy)
+    e_radius = abs(f32_r - R)
+    e_angle = abs(f32_theta - theta_rad)
+
+    sampling_steps = steps or (wall.get_curve_sampling_steps(error_tol=0.008) if hasattr(wall, "get_curve_sampling_steps") else 32)
+    d_theta = theta_rad / max(1, sampling_steps)
+    e_rep = R * (1.0 - math.cos(d_theta / 2.0))
+
+    total = e_center + e_radius + (R * e_angle) + e_rep
+    return {
+        "center_error": e_center,
+        "radius_error": e_radius,
+        "angle_error": e_angle,
+        "rep_error": e_rep,
+        "total_error": total,
+        "valid": total <= 0.01,
+    }
+
+
+def assert_curved_wall_error_budget(wall, budget=0.01):
+    result = compute_curved_wall_error_budget(wall)
+    if not result["valid"] or result["total_error"] > budget:
+        raise ValueError(
+            f"Curved wall {wall.id} exceeds physical error budget {budget} cm: "
+            f"total={result['total_error']:.6f} cm (center={result['center_error']:.6f}, "
+            f"radius={result['radius_error']:.6f}, rep={result['rep_error']:.6f})"
+        )
+    return result
+

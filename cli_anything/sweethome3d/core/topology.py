@@ -107,3 +107,255 @@ def build_room_face_topology(model):
                                                     "s0_cm": 0.0, "s1_cm": edge["length_cm"]})
     return {"schema_version": 1, "scope": "derived-straight-room-faces",
             "edges": records, "room_boundaries": boundaries}
+
+def compute_line_circle_intersections(p1, p2, cx, cy, r, arc_extent_deg, phi1_rad):
+    """Analytic intersection points between a straight line segment and a circular arc (PAC-1 T03, T05).
+
+    Returns list of dicts: {'point': (x, y), 't_line': float, 's_line_cm': float,
+                            'phi_arc': float, 's_arc_cm': float, 'tangent': bool}
+    """
+    x1, y1 = p1
+    x2, y2 = p2
+    dx = x2 - x1
+    dy = y2 - y1
+    line_len = math.hypot(dx, dy)
+    if line_len < 1e-7:
+        return []
+
+    fx = x1 - cx
+    fy = y1 - cy
+    a = dx * dx + dy * dy
+    b = 2.0 * (fx * dx + fy * dy)
+    c = fx * fx + fy * fy - r * r
+
+    disc = b * b - 4.0 * a * c
+    if disc < -1e-7:
+        return []
+
+    roots = []
+    if abs(disc) <= 1e-7:
+        roots.append((-b / (2.0 * a), True))
+    else:
+        sqrt_d = math.sqrt(disc)
+        roots.append(((-b - sqrt_d) / (2.0 * a), False))
+        roots.append(((-b + sqrt_d) / (2.0 * a), False))
+
+    theta_rad = math.radians(arc_extent_deg)
+    phi2_rad = phi1_rad - theta_rad
+    min_phi = min(phi1_rad, phi2_rad) - 1e-7
+    max_phi = max(phi1_rad, phi2_rad) + 1e-7
+
+    intersections = []
+    for t, is_tangent in roots:
+        if -1e-7 <= t <= 1.0 + 1e-7:
+            t_clamped = max(0.0, min(1.0, t))
+            ix = x1 + t_clamped * dx
+            iy = y1 + t_clamped * dy
+            phi = math.atan2(iy - cy, ix - cx)
+            in_arc = False
+            matched_phi = phi
+            for k in (-2, -1, 0, 1, 2):
+                cand = phi + k * 2.0 * math.pi
+                if min_phi <= cand <= max_phi:
+                    in_arc = True
+                    matched_phi = cand
+                    break
+            if in_arc:
+                s_line = t_clamped * line_len
+                d_phi = abs(matched_phi - phi1_rad)
+                s_arc = r * d_phi
+                intersections.append({
+                    "point": (ix, iy),
+                    "t_line": t_clamped,
+                    "s_line_cm": s_line,
+                    "phi_arc": matched_phi,
+                    "s_arc_cm": s_arc,
+                    "tangent": is_tangent,
+                })
+    return intersections
+
+
+def compute_circle_circle_intersections(c1, r1, theta1_deg, phi1_rad,
+                                        c2, r2, theta2_deg, phi2_rad):
+    """Analytic intersection points between two circular arcs (PAC-1 T05).
+
+    Returns list of dicts: {'point': (x, y), 's_arc1_cm': float, 's_arc2_cm': float, 'tangent': bool}
+    """
+    c1x, c1y = c1
+    c2x, c2y = c2
+    dx = c2x - c1x
+    dy = c2y - c1y
+    d = math.hypot(dx, dy)
+    if d > r1 + r2 + 1e-7 or d < abs(r1 - r2) - 1e-7 or d < 1e-7:
+        return []
+
+    is_tangent = abs(d - (r1 + r2)) <= 1e-6 or abs(d - abs(r1 - r2)) <= 1e-6
+    a = (r1 * r1 - r2 * r2 + d * d) / (2.0 * d)
+    h_sq = r1 * r1 - a * a
+    h = math.sqrt(max(0.0, h_sq))
+
+    p0x = c1x + a * (dx / d)
+    p0y = c1y + a * (dy / d)
+
+    points = []
+    if h <= 1e-7 or is_tangent:
+        points.append(((p0x, p0y), True))
+    else:
+        rx = -(dy / d) * h
+        ry = (dx / d) * h
+        points.append(((p0x + rx, p0y + ry), False))
+        points.append(((p0x - rx, p0y - ry), False))
+
+    theta1_rad = math.radians(theta1_deg)
+    phi1_end = phi1_rad - theta1_rad
+    min1 = min(phi1_rad, phi1_end) - 1e-7
+    max1 = max(phi1_rad, phi1_end) + 1e-7
+
+    theta2_rad = math.radians(theta2_deg)
+    phi2_end = phi2_rad - theta2_rad
+    min2 = min(phi2_rad, phi2_end) - 1e-7
+    max2 = max(phi2_rad, phi2_end) + 1e-7
+
+    valid_pts = []
+    for (px, py), tangent_flag in points:
+        phi_a = math.atan2(py - c1y, px - c1x)
+        phi_b = math.atan2(py - c2y, px - c2x)
+        in1, in2 = False, False
+        m_phi1, m_phi2 = phi_a, phi_b
+        for k in (-2, -1, 0, 1, 2):
+            if min1 <= phi_a + k * 2.0 * math.pi <= max1:
+                in1 = True
+                m_phi1 = phi_a + k * 2.0 * math.pi
+                break
+        for k in (-2, -1, 0, 1, 2):
+            if min2 <= phi_b + k * 2.0 * math.pi <= max2:
+                in2 = True
+                m_phi2 = phi_b + k * 2.0 * math.pi
+                break
+        if in1 and in2:
+            s_arc1 = r1 * abs(m_phi1 - phi1_rad)
+            s_arc2 = r2 * abs(m_phi2 - phi2_rad)
+            valid_pts.append({
+                "point": (px, py),
+                "s_arc1_cm": s_arc1,
+                "s_arc2_cm": s_arc2,
+                "tangent": tangent_flag,
+            })
+    return valid_pts
+
+
+def compute_wall_analytic_stations(walls):
+    """Computes exact analytic stations and intersection topology across straight and curved walls (PAC-1 T03, T05).
+
+    Returns a mapping of wall_id -> list of sorted station records along the wall.
+    """
+    wall_list = list(walls.values()) if hasattr(walls, "values") else list(walls)
+    stations_by_wall = {w.id: [] for w in wall_list}
+
+    # Internal wall metadata cache
+    geom = {}
+    for w in wall_list:
+        is_curved = abs(w.arc_extent) >= 1e-4
+        if is_curved:
+            c = w.chord_length
+            theta_rad = math.radians(w.arc_extent)
+            sin_half = math.sin(abs(theta_rad) / 2.0)
+            r = c / (2.0 * sin_half) if abs(sin_half) > 1e-6 else c
+            h = r * math.cos(abs(theta_rad) / 2.0)
+            mx = (w.x_start + w.x_end) / 2.0
+            my = (w.y_start + w.y_end) / 2.0
+            nx = -(w.y_end - w.y_start) / c
+            ny = (w.x_end - w.x_start) / c
+            sign = 1.0 if w.arc_extent > 0 else -1.0
+            cx = mx - sign * h * nx
+            cy = my - sign * h * ny
+            phi1 = math.atan2(w.y_start - cy, w.x_start - cx)
+            geom[w.id] = {"curved": True, "c": (cx, cy), "r": r, "theta_deg": w.arc_extent,
+                          "phi1": phi1, "len": w.length}
+        else:
+            geom[w.id] = {"curved": False, "p1": (w.x_start, w.y_start),
+                          "p2": (w.x_end, w.y_end), "len": w.length}
+
+    # Always record start and end stations
+    for w in wall_list:
+        stations_by_wall[w.id].append({"station_cm": 0.0, "point": (w.x_start, w.y_start), "kind": "endpoint", "peer_id": None})
+        stations_by_wall[w.id].append({"station_cm": w.length, "point": (w.x_end, w.y_end), "kind": "endpoint", "peer_id": None})
+
+    # Pairwise intersections
+    for i, w1 in enumerate(wall_list):
+        g1 = geom[w1.id]
+        for w2 in wall_list[i + 1:]:
+            g2 = geom[w2.id]
+            if w1.level_id != w2.level_id:
+                continue
+
+            if not g1["curved"] and not g2["curved"]:
+                # Line-line intersection
+                x1, y1 = g1["p1"]
+                x2, y2 = g1["p2"]
+                x3, y3 = g2["p1"]
+                x4, y4 = g2["p2"]
+                denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+                if abs(denom) > 1e-7:
+                    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+                    u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
+                    if -1e-7 <= t <= 1.0 + 1e-7 and -1e-7 <= u <= 1.0 + 1e-7:
+                        t_c = max(0.0, min(1.0, t))
+                        u_c = max(0.0, min(1.0, u))
+                        ix = x1 + t_c * (x2 - x1)
+                        iy = y1 + t_c * (y2 - y1)
+                        s1 = t_c * g1["len"]
+                        s2 = u_c * g2["len"]
+                        stations_by_wall[w1.id].append({"station_cm": s1, "point": (ix, iy), "kind": "line_line", "peer_id": w2.id})
+                        stations_by_wall[w2.id].append({"station_cm": s2, "point": (ix, iy), "kind": "line_line", "peer_id": w1.id})
+
+            elif not g1["curved"] and g2["curved"]:
+                # Line-arc intersection
+                hits = compute_line_circle_intersections(
+                    g1["p1"], g1["p2"], g2["c"][0], g2["c"][1], g2["r"],
+                    g2["theta_deg"], g2["phi1"]
+                )
+                for h in hits:
+                    stations_by_wall[w1.id].append({"station_cm": h["s_line_cm"], "point": h["point"],
+                                                    "kind": "tangent" if h["tangent"] else "secant", "peer_id": w2.id})
+                    stations_by_wall[w2.id].append({"station_cm": h["s_arc_cm"], "point": h["point"],
+                                                    "kind": "tangent" if h["tangent"] else "secant", "peer_id": w1.id})
+
+            elif g1["curved"] and not g2["curved"]:
+                # Arc-line intersection
+                hits = compute_line_circle_intersections(
+                    g2["p1"], g2["p2"], g1["c"][0], g1["c"][1], g1["r"],
+                    g1["theta_deg"], g1["phi1"]
+                )
+                for h in hits:
+                    stations_by_wall[w1.id].append({"station_cm": h["s_arc_cm"], "point": h["point"],
+                                                    "kind": "tangent" if h["tangent"] else "secant", "peer_id": w2.id})
+                    stations_by_wall[w2.id].append({"station_cm": h["s_line_cm"], "point": h["point"],
+                                                    "kind": "tangent" if h["tangent"] else "secant", "peer_id": w1.id})
+
+            else:
+                # Arc-arc intersection
+                hits = compute_circle_circle_intersections(
+                    g1["c"], g1["r"], g1["theta_deg"], g1["phi1"],
+                    g2["c"], g2["r"], g2["theta_deg"], g2["phi1"]
+                )
+                for h in hits:
+                    stations_by_wall[w1.id].append({"station_cm": h["s_arc1_cm"], "point": h["point"],
+                                                    "kind": "tangent" if h["tangent"] else "secant", "peer_id": w2.id})
+                    stations_by_wall[w2.id].append({"station_cm": h["s_arc2_cm"], "point": h["point"],
+                                                    "kind": "tangent" if h["tangent"] else "secant", "peer_id": w1.id})
+
+    # Deduplicate and sort stations along each wall
+    for wid in stations_by_wall:
+        unique = []
+        seen = set()
+        for rec in stations_by_wall[wid]:
+            s_round = round(rec["station_cm"], 4)
+            if s_round not in seen:
+                seen.add(s_round)
+                unique.append(rec)
+        unique.sort(key=lambda r: r["station_cm"])
+        stations_by_wall[wid] = unique
+
+    return stations_by_wall
+
