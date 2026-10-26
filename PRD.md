@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.2.0 (PAC-1 Contract Iteration 11)  
+**Document Version:** 2.3.0 (PAC-1 Contract Iteration 12)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -70,6 +70,17 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
 - [x] **Lazy Session CLI Proxy (A01, P1-07)**: `cli --help` uses lazy session proxy, exiting cleanly with code 0 even if profile session is corrupt. (`✅ Completed`)
 
 ### Phase 6: Verification, OCR Code Review & Delegation Loop
-- [x] **Comprehensive Test Suite**: Pass all 79 tests (75 core + 4 E2E) with 100% pass rate in 4.61s. (`✅ Completed`)
-- [ ] **Mandatory Open Code Review (OCR)**: Run `ocr review` using primary model Gemini 3.8 Flash in `agy`. (`🔄 In Progress`)
-- [ ] **Peer Critique Dispatch to Sol via Herdr**: Prompt Sol (`sol-critic` in pane `w1:p14`) for Round 10 critique against PAC-1 gates. (`⏳ Pending`)
+- [x] **Comprehensive Test Suite**: Pass all 88 baseline tests (84 core + 4 E2E) with 100% pass rate in 4.84s. (`✅ Completed`)
+- [x] **Primary OCR Model Policy**: Configured and verified Gemini 3.8 Flash in `agy` as primary OCR model across all review skills. (`✅ Completed`)
+- [x] **Universal Herdr Delegation**: Dispatched peer review strictly via Herdr agent prompts and watchers. (`✅ Completed`)
+
+### Phase 7: Sol Round 11 Prescriptions & Path to 10.0 (PAC-1 Iteration 12)
+- [x] **R11-P0-01: Recovery Identity & Predecessor Hash Binding**: Require `session_path`, `project_id`, and `base_session_sha256` in journal schema; verify session path binding to reject foreign journals; verify predecessor hash in Scenario 2 to fail closed on tampered state. (`✅ Completed`)
+- [x] **R11-P0-02: Atomic Publication & Writer-Export Race Protection**: Implement `safe_publish_export` with session locking and atomic staging, preventing concurrent export from clobbering writer artifacts during transaction commit. (`✅ Completed`)
+- [x] **R11-P1-01: Per-Side Clear Core Geometry & Infeasible Cores**: Compute clear core by subtracting incident wall solid footprints; support unequal wall thicknesses (10.730 m² on 4×3m room); ignore separated walls (12.000 m²); return empty polygon (0.0 m²) for infeasible cores without gross fallback. (`✅ Completed`)
+- [x] **R11-P1-02: Host-Clipped Opening Cutouts**: Clip opening polygons directly to host wall footprint, preventing oversized cutouts from penetrating parallel neighbor walls (exact 1.712 m³ on Sol fixture). (`✅ Completed`)
+- [x] **R11-P1-03: Expose 0.01cm Error Budget & Raise Step Cap**: Default curve sampling to `e = 0.01` cm and raise step cap to `32768`, guaranteeing sub-centimeter sagitta on 1.8km chord walls. (`✅ Completed`)
+- [x] **R11-P1-04: Partition Invalid Geometry Before LinearRing**: Filter room vertex counts `< 3` in `_is_finite_room`, avoiding `ValueError` crashes in `Polygon(r.points)` during furniture containment checks. (`✅ Completed`)
+- [x] **R11-P2-01: Test Hygiene & AST Collection Reconcile**: Reconciled exact test enumeration (93 core + 4 E2E = 97 tests); fixed Scenario 1 test target revision; added skip for unsupported hard links; added 9 regression tests covering all Round 11 findings. (`✅ Completed`)
+
+

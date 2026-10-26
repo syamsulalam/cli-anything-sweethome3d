@@ -29,14 +29,14 @@ def _calc_sha256(path):
     return h.hexdigest()
 
 def _validate_journal_schema(rec):
-    """Validates that a journal dictionary conforms strictly to the recovery schema (PAC-1 S01, R10-P0-01)."""
+    """Validates that a journal dictionary conforms strictly to the recovery schema (PAC-1 S01, R10-P0-01, R11-P0-01)."""
     if not isinstance(rec, dict):
         return False
     if type(rec.get("schema_version")) is not int or isinstance(rec.get("schema_version"), bool) or rec.get("schema_version") != 1:
         return False
     
-    # Required non-empty string fields
-    req_str_keys = ["tx_id", "target", "staged_session", "candidate_session_sha256", "candidate_artifact_sha256"]
+    # Required non-empty string fields including session_path and project_id binding (R11-P0-01)
+    req_str_keys = ["tx_id", "session_path", "project_id", "target", "staged_session", "candidate_session_sha256", "candidate_artifact_sha256"]
     for k in req_str_keys:
         val = rec.get(k)
         if not isinstance(val, str) or not val.strip():
@@ -57,6 +57,17 @@ def _validate_journal_schema(rec):
         return False
     if rec["target_revision"] <= rec["expected_revision"]:
         return False
+
+    exp_rev = rec["expected_revision"]
+    if exp_rev > 0:
+        base_sess_sha = rec.get("base_session_sha256")
+        if not isinstance(base_sess_sha, str) or len(base_sess_sha) != 64 or not all(c in "0123456789abcdefABCDEF" for c in base_sess_sha):
+            return False
+    else:
+        base_sess_sha = rec.get("base_session_sha256")
+        if base_sess_sha is not None:
+            if not isinstance(base_sess_sha, str) or len(base_sess_sha) != 64 or not all(c in "0123456789abcdefABCDEF" for c in base_sess_sha):
+                return False
 
     # had_target MUST be an explicit boolean
     if not isinstance(rec.get("had_target"), bool):
@@ -171,6 +182,10 @@ def _reconcile_pending(filepath):
     if not _validate_journal_schema(rec):
         return
 
+    # R11-P0-01: Verify bound session path matches this session file (reject foreign journals)
+    if rec.get("session_path") != os.path.normcase(os.path.abspath(filepath)):
+        return
+
     target = rec.get("target")
     tmp_target = rec.get("tmp_target")
     backup = rec.get("backup")
@@ -230,6 +245,14 @@ def _reconcile_pending(filepath):
 
     # Scenario 2: Candidate session is staged on disk and current revision is expected_revision
     elif staged_session and os.path.exists(staged_session):
+        # R11-P0-01: Verify current predecessor session file matches base_session_sha256
+        if expected_rev > 0:
+            base_sess_sha = rec.get("base_session_sha256")
+            if not os.path.exists(filepath) or _calc_sha256(filepath) != base_sess_sha:
+                # Predecessor session state altered or corrupted on disk!
+                # Fail closed: preserve journal evidence and abort recovery.
+                return
+
         # P0-01: Verify staged session matches candidate_session_sha256
         staged_sess_sha = _calc_sha256(staged_session)
         if staged_sess_sha != cand_sess_sha:
@@ -410,15 +433,21 @@ def _locked_save_json(filepath, data, expected_revision=None, timeout_sec=5.0, p
             cand_art_sha = _calc_sha256(art_tmp)
             cand_sess_sha = _calc_sha256(tmp_file)
             base_art_sha = _calc_sha256(art_target) if had_target else None
+            base_sess_sha = _calc_sha256(filepath) if (os.path.exists(filepath) and disk_rev > 0) else None
+            session_path_norm = os.path.normcase(os.path.abspath(filepath))
+            project_id_str = str(data.get("model", {}).get("name") or "Unnamed")
 
             # Step 2: Write pending intent record atomically (FAIL CLOSED)
             pending_record = {
                 "schema_version": 1,
                 "tx_id": tx_id,
+                "session_path": session_path_norm,
+                "project_id": project_id_str,
                 "target": art_target,
                 "tmp_target": art_tmp,
                 "candidate_artifact_sha256": cand_art_sha,
                 "candidate_session_sha256": cand_sess_sha,
+                "base_session_sha256": base_sess_sha,
                 "base_artifact_sha256": base_art_sha,
                 "backup": art_bak if had_target else None,
                 "had_target": had_target,
@@ -546,8 +575,62 @@ def _locked_save_json(filepath, data, expected_revision=None, timeout_sec=5.0, p
             except OSError:
                 pass
 
+@contextmanager
+def locked_session(filepath, timeout_sec=5.0):
+    """Acquires an OS-level exclusive file lock for the session file (PAC-1 S04, S06, R11-P0-02)."""
+    os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+    lock_file = filepath + ".lock"
+    start_time = time.time()
+    lock_fd = None
+    try:
+        while True:
+            try:
+                lock_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
+                if sys.platform == "win32":
+                    import msvcrt
+                    msvcrt.locking(lock_fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (OSError, IOError):
+                if lock_fd is not None:
+                    try:
+                        os.close(lock_fd)
+                    except OSError:
+                        pass
+                    lock_fd = None
+                if time.time() - start_time > timeout_sec:
+                    raise TimeoutError(f"Timed out after {timeout_sec}s acquiring session lock on '{lock_file}'.")
+                time.sleep(0.02)
+        yield
+    finally:
+        if lock_fd is not None:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    try:
+                        os.lseek(lock_fd, 0, os.SEEK_SET)
+                        msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        pass
+                else:
+                    import fcntl
+                    try:
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                os.close(lock_fd)
+            except OSError:
+                pass
+
 class SessionManager:
     """Manages active session, file persistence, and undo/redo stacks."""
+
+    def lock(self, timeout_sec=5.0):
+        """Acquires an exclusive lock on this session (PAC-1 R11-P0-02)."""
+        return locked_session(self.session_path, timeout_sec=timeout_sec)
+
 
     def __init__(self, session_path=SESSION_FILE):
         self.session_path = session_path

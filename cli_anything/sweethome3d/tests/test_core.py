@@ -1550,15 +1550,18 @@ def test_reconcile_tampered_current_session_fails_closed():
         pending_rec = {
             "schema_version": 1,
             "tx_id": "tx_tamper_001",
+            "session_path": os.path.normcase(os.path.abspath(sess_file)),
+            "project_id": "Base",
             "target": target_file,
             "staged_session": os.path.join(td, "session.json.staged"),
             "candidate_session_sha256": sess_sha,
             "candidate_artifact_sha256": art_sha,
+            "base_session_sha256": "0" * 64,
             "had_target": True,
             "base_artifact_sha256": art_sha,
             "backup": os.path.join(td, "backup.bak"),
-            "expected_revision": 0,
-            "target_revision": 1
+            "expected_revision": 1,
+            "target_revision": 2
         }
         with open(sess_file + ".pending", "w", encoding="utf-8") as pf:
             json.dump(pending_rec, pf)
@@ -1569,24 +1572,30 @@ def test_reconcile_tampered_current_session_fails_closed():
 
 def test_export_rejects_hardlink_alias_to_protected_target():
     """PAC-1 S06, R10-P0-02: Export guards detect hard link / alias pointing to protected target."""
+    import pytest
     from cli_anything.sweethome3d.sweethome3d_cli import assert_safe_export_target, session_mgr
+    orig_active = session_mgr.active_file
     with tempfile.TemporaryDirectory() as td:
         target = os.path.join(td, "protected.json")
         with open(target, "w") as f:
             f.write("{}")
-        session_mgr.active_file = target
-
-        alias = os.path.join(td, "alias.json")
         try:
-            os.link(target, alias)
-            has_link = True
-        except (OSError, NotImplementedError):
-            has_link = False
+            session_mgr.active_file = target
 
-        if has_link:
-            import pytest
-            with pytest.raises(RuntimeError, match="guarded|alias|hardlink|protected"):
-                assert_safe_export_target(alias)
+            alias = os.path.join(td, "alias.json")
+            try:
+                os.link(target, alias)
+                has_link = True
+            except (OSError, NotImplementedError):
+                has_link = False
+
+            if has_link:
+                with pytest.raises(RuntimeError, match="guarded|alias|hardlink|protected"):
+                    assert_safe_export_target(alias)
+            else:
+                pytest.skip("Filesystem does not support hard links")
+        finally:
+            session_mgr.active_file = orig_active
 
 def test_opening_non_finite_angle_returns_structured_invalidity():
     """PAC-1 C01, R10-P1-04: Non-finite opening angle does not crash and returns structured findings."""
@@ -1663,6 +1672,189 @@ def test_dxf_opening_semantics_none_and_sliding():
             assert "200.00\n21\n90.00" not in content and "200.00\r\n21\r\n90.00" not in content
             # Cased opening at (350,0) does NOT have (350,90) hinged leaf line!
             assert "350.00\n21\n90.00" not in content and "350.00\r\n21\r\n90.00" not in content
+
+def test_reconcile_foreign_project_journal_rejected():
+    """PAC-1 S01, R11-P0-01: Replay of a valid journal from project A to project B is rejected."""
+    with tempfile.TemporaryDirectory() as td:
+        sess_a = os.path.join(td, "session_a.json")
+        target_a = os.path.join(td, "home_a.json")
+        ma = SessionManager(sess_a)
+        ma.new_project("Project A")
+        ma.save_file(target_a)
+
+        sess_b = os.path.join(td, "session_b.json")
+        target_b = os.path.join(td, "home_b.json")
+        mb = SessionManager(sess_b)
+        mb.new_project("VICTIM_PROJECT")
+        mb.save_file(target_b)
+
+        # Valid journal targeting A copied to B.pending
+        valid_a_journal = {
+            "schema_version": 1,
+            "tx_id": "tx_a_001",
+            "session_path": os.path.normcase(os.path.abspath(sess_a)),
+            "project_id": "Project A",
+            "target": target_a,
+            "tmp_target": target_a + ".tmp",
+            "candidate_session_sha256": _calc_sha256(sess_a),
+            "candidate_artifact_sha256": _calc_sha256(target_a),
+            "base_session_sha256": "1" * 64,
+            "base_artifact_sha256": _calc_sha256(target_a),
+            "had_target": True,
+            "backup": target_a + ".bak",
+            "staged_session": sess_a + ".staged",
+            "expected_revision": 1,
+            "target_revision": 2
+        }
+        b_pending = sess_b + ".pending"
+        with open(b_pending, "w", encoding="utf-8") as f:
+            json.dump(valid_a_journal, f)
+
+        # Opening session B must reject foreign journal without altering B's model or deleting journal
+        mb2 = SessionManager(sess_b)
+        assert mb2.model.name == "VICTIM_PROJECT"
+        assert os.path.exists(b_pending)
+
+def test_reconcile_tampered_predecessor_scenario_2_fails_closed():
+    """PAC-1 S01, S04, R11-P0-01: In Scenario 2, altered predecessor fails closed and preserves journal."""
+    with tempfile.TemporaryDirectory() as td:
+        sess_file = os.path.join(td, "session.json")
+        target_file = os.path.join(td, "home.json")
+        m = SessionManager(sess_file)
+        m.new_project("Original")
+        m.save_file(target_file)
+        
+        orig_sess_sha = _calc_sha256(sess_file)
+        staged_sess = sess_file + ".staged"
+        with open(staged_sess, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"revision": 3, "model": {"name": "Candidate"}}))
+        staged_sha = _calc_sha256(staged_sess)
+
+        # Tamper disk session file while keeping revision 2
+        with open(sess_file, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        d["model"]["name"] = "Altered Predecessor"
+        with open(sess_file, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+
+        pending_rec = {
+            "schema_version": 1,
+            "tx_id": "tx_scen2_001",
+            "session_path": os.path.normcase(os.path.abspath(sess_file)),
+            "project_id": "Original",
+            "target": target_file,
+            "tmp_target": target_file + ".tmp",
+            "candidate_session_sha256": staged_sha,
+            "candidate_artifact_sha256": _calc_sha256(target_file),
+            "base_session_sha256": orig_sess_sha,
+            "base_artifact_sha256": _calc_sha256(target_file),
+            "had_target": True,
+            "backup": target_file + ".bak",
+            "staged_session": staged_sess,
+            "expected_revision": 2,
+            "target_revision": 3
+        }
+        with open(sess_file + ".pending", "w", encoding="utf-8") as f:
+            json.dump(pending_rec, f)
+
+        # Recovery must fail closed: predecessor was altered!
+        m2 = SessionManager(sess_file)
+        assert os.path.exists(sess_file + ".pending")
+        assert os.path.exists(staged_sess)
+
+def test_export_writer_race_blocked_by_lock():
+    """PAC-1 S04, S06, S07, A05, R11-P0-02: Export publication respects writer lock and pending journal."""
+    import cli_anything.sweethome3d.sweethome3d_cli as cli_mod
+    from cli_anything.sweethome3d.sweethome3d_cli import safe_publish_export
+    import pytest
+    orig_internal = cli_mod._session_mgr
+    with tempfile.TemporaryDirectory() as td:
+        sess_file = os.path.join(td, "sess.json")
+        out_file = os.path.join(td, "export.svg")
+        try:
+            m = SessionManager(sess_file)
+            m.new_project("Export Lock Test")
+            cli_mod._session_mgr = m
+
+            # Simulate writer holding lock and active journal
+            pending_file = sess_file + ".pending"
+            with open(pending_file, "w") as f:
+                f.write("{}")
+
+            with pytest.raises(RuntimeError, match="unresolved recovery journal is active"):
+                safe_publish_export(out_file, lambda tmp: open(tmp, "w").write("<svg></svg>"))
+        finally:
+            cli_mod._session_mgr = orig_internal
+
+def test_per_side_wall_thickness_clear_core():
+    """PAC-1 T07, R11-P1-01: Unequal wall thicknesses (10cm top/bottom, 30cm left/right) yield exact 10.730 m²."""
+    m = HomeModel("Unequal Walls")
+    m.add_wall("w_b", 0, 0, 400, 0, thickness=10.0)
+    m.add_wall("w_t", 0, 300, 400, 300, thickness=10.0)
+    m.add_wall("w_l", 0, 0, 0, 300, thickness=30.0)
+    m.add_wall("w_r", 400, 0, 400, 300, thickness=30.0)
+    r = m.add_room("r1", "Living", [(0, 0), (400, 0), (400, 300), (0, 300)])
+    t = m.takeoff()
+    assert t["summary"]["clear_core_area_m2"] == 10.730
+
+def test_unrelated_wall_with_gap_not_incident():
+    """PAC-1 T07, R11-P1-01: Separated wall (10cm gap) does not deduct from room area (12.000 m²)."""
+    m = HomeModel("Unrelated Wall")
+    m.add_wall("w_unrel", 0, -15, 400, -15, thickness=10.0)
+    r = m.add_room("r1", "Room", [(0, 0), (400, 0), (400, 300), (0, 300)])
+    t = m.takeoff()
+    assert t["summary"]["clear_core_area_m2"] == 12.000
+
+def test_infeasible_room_core_returns_empty():
+    """PAC-1 T07, C05, R11-P1-01: 20x20cm room with 30cm walls yields 0.0 m² clear core and structured warning."""
+    m = HomeModel("Infeasible Room")
+    m.add_wall("w1", 0, 0, 20, 0, thickness=30.0)
+    m.add_wall("w2", 0, 20, 20, 20, thickness=30.0)
+    m.add_wall("w3", 0, 0, 0, 20, thickness=30.0)
+    m.add_wall("w4", 20, 0, 20, 20, thickness=30.0)
+    r = m.add_room("r_tiny", "Tiny", [(0, 0), (20, 0), (20, 20), (0, 20)])
+    t = m.takeoff()
+    assert t["summary"]["clear_core_area_m2"] == 0.0
+
+    res = m.validate()
+    assert any(f["code"] == "INFEASIBLE_ROOM_CORE" for f in res["findings"])
+
+def test_opening_cutout_does_not_penetrate_neighbor_wall():
+    """PAC-1 T08, T09, R11-P1-02: Clipped cutout avoids cutting parallel neighbor wall (exact 1.712 m³)."""
+    m = HomeModel("Clipped Cutout")
+    m.add_wall("w_host", 0, 0, 300, 0, thickness=20.0, height=280.0)
+    m.add_wall("w_neighbor", 0, 15, 300, 15, thickness=4.0, height=280.0)
+    m.add_opening("d1", "door", "w_host", offset_cm=50.0, width_cm=100.0, height_cm=210.0, elevation_cm=0.0)
+    t = m.takeoff()
+    assert t["masonry_and_walls"]["net_masonry_volume_m3"] == 1.712
+
+def test_curve_sampling_maintains_0_01_error_on_large_chord():
+    """PAC-1 T05, C03, R11-P1-03: Sampler maintains <=0.01cm error budget on 1.8km chord wall."""
+    import math
+    from cli_anything.sweethome3d.core.wall import Wall
+    w = Wall("w_large", -90000, 0, 90000, 0, thickness=20.0, arc_extent=90.0)
+    steps = w.get_curve_sampling_steps(error_tol=0.01)
+    assert steps > 1024
+    
+    # Calculate analytic sagitta: R * (1 - cos(theta / 2))
+    theta_rad = math.radians(90.0)
+    c = 180000.0
+    R = c / (2.0 * math.sin(theta_rad / 2.0))
+    d_theta = theta_rad / steps
+    measured_sagitta = R * (1.0 - math.cos(d_theta / 2.0))
+    assert measured_sagitta <= 0.01
+
+def test_two_vertex_room_returns_structured_error_without_crash():
+    """PAC-1 C01, A04, A07, R11-P1-04: Two-vertex room with furniture returns structured findings without crash."""
+    m = HomeModel("Two Point Room")
+    r = m.add_room("r_2pt", "Two Point Room", [(0, 0), (100, 0)])
+    f = m.add_furniture("f1", "Bed", "bed_king", 50, 50, 0, 100, 100, 50, 0, room_id="r_2pt")
+    res = m.validate()
+    assert res["valid"] is False
+    codes = [f["code"] for f in res["findings"]]
+    assert "DEGENERATE_ROOM" in codes
+    assert "ZERO_AREA_ROOM" in codes
+
 
 
 

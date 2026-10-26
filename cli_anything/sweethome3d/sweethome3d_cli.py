@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import time
 import click
 
 from cli_anything.sweethome3d.core import (
@@ -81,6 +82,51 @@ def assert_safe_export_target(output_path):
                         )
                 except (OSError, ValueError):
                     pass
+
+def safe_publish_export(output_path, generator_fn):
+    """Safely stages an export artifact, acquires exclusive session authority,
+    rechecks destination guards, asserts no pending transaction, and atomically publishes.
+    (PAC-1 S04, S06, S07, A05, R11-P0-02)
+    """
+    output_path = os.path.abspath(output_path)
+    assert_safe_export_target(output_path)
+    
+    tx_id = f"{os.getpid()}_{time.time_ns()}"
+    tmp_out = output_path + f".tmp_exp_{tx_id}"
+    
+    try:
+        # Step 1: Stage export to temporary file
+        generator_fn(tmp_out)
+        
+        # Step 2: Acquire session lock before publishing
+        mgr = get_session_mgr()
+        with mgr.lock():
+            # Recheck destination safety under lock
+            assert_safe_export_target(output_path)
+            
+            # Assert no active transaction is pending on this session
+            pending_file = mgr.session_path + ".pending"
+            if os.path.exists(pending_file):
+                raise RuntimeError(
+                    f"Cannot publish export to '{output_path}': an unresolved recovery journal is active on session '{mgr.session_path}'."
+                )
+            
+            # Also check if destination itself has an active lock/journal
+            if os.path.exists(output_path + ".lock") or os.path.exists(output_path + ".pending"):
+                raise RuntimeError(
+                    f"Cannot publish export to '{output_path}': destination has an active transaction or lock in flight."
+                )
+            
+            # Atomic publish via os.replace
+            os.replace(tmp_out, output_path)
+            return output_path
+    finally:
+        if os.path.exists(tmp_out):
+            try:
+                os.remove(tmp_out)
+            except OSError:
+                pass
+
 
 def output_result(ctx, data, human_formatter=None):
     """Outputs data either as JSON or human-readable format based on context flag."""
@@ -743,8 +789,7 @@ def export():
 def export_svg_cmd(ctx, output, level_id):
     """Export layered architectural vector SVG."""
     try:
-        assert_safe_export_target(output)
-        out_path = export_svg(session_mgr.model, output, level_id=level_id)
+        out_path = safe_publish_export(output, lambda tmp: export_svg(session_mgr.model, tmp, level_id=level_id))
         output_result(ctx, {"exported": out_path, "format": "svg", "level": level_id or "all"})
     except Exception as e:
         output_error(ctx, f"Export SVG failed: {e}")
@@ -756,8 +801,7 @@ def export_svg_cmd(ctx, output, level_id):
 def export_dxf_cmd(ctx, output, level_id):
     """Export AutoCAD-compatible DXF R12 file."""
     try:
-        assert_safe_export_target(output)
-        out_path = export_dxf(session_mgr.model, output, level_id=level_id)
+        out_path = safe_publish_export(output, lambda tmp: export_dxf(session_mgr.model, tmp, level_id=level_id))
         output_result(ctx, {"exported": out_path, "format": "dxf", "level": level_id or "all"})
     except Exception as e:
         output_error(ctx, f"Export DXF failed: {e}")
@@ -769,8 +813,7 @@ def export_dxf_cmd(ctx, output, level_id):
 def export_html_cmd(ctx, output, level_id):
     """Export interactive self-contained HTML floor plan viewer."""
     try:
-        assert_safe_export_target(output)
-        out_path = export_html(session_mgr.model, output, level_id=level_id)
+        out_path = safe_publish_export(output, lambda tmp: export_html(session_mgr.model, tmp, level_id=level_id))
         output_result(ctx, {"exported": out_path, "format": "html", "level": level_id or "all"})
     except Exception as e:
         output_error(ctx, f"Export HTML failed: {e}")
@@ -781,8 +824,7 @@ def export_html_cmd(ctx, output, level_id):
 def export_sh3d_cmd(ctx, output):
     """Export Sweet Home 3D native compressed ZIP archive (.sh3d)."""
     try:
-        assert_safe_export_target(output)
-        out_path = session_mgr.model.save_sh3d(output)
+        out_path = safe_publish_export(output, lambda tmp: session_mgr.model.save_sh3d(tmp))
         output_result(ctx, {"exported": out_path, "format": "sh3d"})
     except Exception as e:
         output_error(ctx, f"Export SH3D failed: {e}")
@@ -794,8 +836,7 @@ def export_sh3d_cmd(ctx, output):
 def export_json_cmd(ctx, output, level_id):
     """Export structured JSON floor plan model."""
     try:
-        assert_safe_export_target(output)
-        out_path = export_json(session_mgr.model, output, level_id=level_id)
+        out_path = safe_publish_export(output, lambda tmp: export_json(session_mgr.model, tmp, level_id=level_id))
         output_result(ctx, {"exported": out_path, "format": "json", "level": level_id or "all"})
     except Exception as e:
         output_error(ctx, f"Export JSON failed: {e}")

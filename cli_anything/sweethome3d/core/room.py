@@ -74,9 +74,10 @@ class Room:
         return (round(cx, 2), round(cy, 2))
 
     def get_clear_core_polygon(self, walls=None):
-        """Derives the inward-mitred clear core polygon bounded by actual incident walls (PAC-1 T07, R10-P1-01)."""
+        """Derives the clear core polygon bounded by actual incident walls (PAC-1 T07, R10-P1-01, R11-P1-01)."""
         try:
             from shapely.geometry import Polygon, LineString
+            from shapely.ops import unary_union
         except ImportError:
             return None
         
@@ -88,28 +89,33 @@ class Room:
             return poly
 
         # Find incident walls on the exact same level
-        incident_thicknesses = []
+        incident_wall_polys = []
         if walls:
             room_boundary = poly.boundary
-            for w in walls:
+            wall_list = walls.values() if isinstance(walls, dict) else walls
+            for w in wall_list:
                 if getattr(w, "level_id", None) != self.level_id:
                     continue
                 w_line = LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)])
-                if room_boundary.distance(w_line) <= max(w.thickness, 20.0):
-                    incident_thicknesses.append(w.thickness)
+                # Incident check: wall centerline must touch/align with room boundary within 2.0 cm
+                if room_boundary.distance(w_line) <= 2.0:
+                    t = w.thickness / 2.0
+                    if abs(getattr(w, "arc_extent", 0.0)) > 1e-4 and w.length > 0:
+                        steps = w.get_curve_sampling_steps()
+                        pts = [w.point_at_offset(i * w.length / steps) for i in range(steps + 1)]
+                        w_poly = LineString(pts).buffer(t, cap_style="square")
+                    else:
+                        w_poly = LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)]).buffer(t, cap_style="square")
+                    incident_wall_polys.append(w_poly)
 
-        if incident_thicknesses:
-            t_wall = sum(incident_thicknesses) / len(incident_thicknesses)
-        else:
-            t_wall = 0.0
-
-        if t_wall <= 0.0:
+        if not incident_wall_polys:
             return poly
 
-        # Mitred inward buffer (join_style=2 is mitre)
-        clear_poly = poly.buffer(-(t_wall / 2.0), join_style=2)
-        if clear_poly.is_empty:
-            return poly
+        u_incident = unary_union(incident_wall_polys)
+        clear_poly = poly.difference(u_incident)
+        if clear_poly.is_empty or clear_poly.area < 1e-4:
+            # Infeasible clear core (walls consume entire room area)
+            return Polygon()
         return clear_poly
 
     def to_dict(self):

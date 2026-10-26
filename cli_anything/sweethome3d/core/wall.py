@@ -173,10 +173,10 @@ class Wall:
         return extrema
 
     def get_curve_sampling_steps(self, error_tol=None):
-        """Computes scale-bounded curve sampling steps based on chord error (PAC-1 R10-P1-03).
+        """Computes scale-bounded curve sampling steps based on chord error (PAC-1 R10-P1-03, R11-P1-03).
         
-        Guarantees that chord sagitta deviation remains bounded by error_tol or half-thickness,
-        preventing scale-dependent collision misses.
+        Guarantees that chord sagitta deviation remains bounded by error_tol (default 0.01 cm),
+        preventing scale-dependent collision misses and satisfying the PAC-1 numerical budget.
         """
         if not math.isfinite(self.arc_extent) or abs(self.arc_extent) < 1e-4 or self.length <= 0:
             return 1
@@ -187,15 +187,15 @@ class Wall:
         if not math.isfinite(R) or R < 1e-4:
             return 16
         if error_tol is None:
-            e = min(1.0, max(0.1, self.thickness / 4.0))
+            e = 0.01  # PAC-1 declared linear error budget (0.01 cm)
         else:
-            e = max(0.01, float(error_tol))
+            e = max(0.001, float(error_tol))
         ratio = max(-1.0, min(1.0, 1.0 - (e / R)))
         d_theta = 2.0 * math.acos(ratio)
         if d_theta < 1e-6:
             return 16
         steps = int(math.ceil(theta_rad / d_theta))
-        return min(1024, max(16, steps))
+        return min(32768, max(16, steps))
 
     def to_dict(self):
         return {

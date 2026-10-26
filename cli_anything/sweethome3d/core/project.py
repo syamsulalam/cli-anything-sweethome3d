@@ -319,16 +319,20 @@ class HomeModel:
 
         for r in self.rooms.values():
             clear_poly = r.get_clear_core_polygon(self.walls.values())
-            if clear_poly is not None and not clear_poly.is_empty:
-                clear_core_area_m2 += clear_poly.area / 10000.0
-                clear_face_skirting_gross_m += clear_poly.length / 100.0
+            if clear_poly is not None:
+                if not clear_poly.is_empty:
+                    clear_core_area_m2 += clear_poly.area / 10000.0
+                    clear_face_skirting_gross_m += clear_poly.length / 100.0
+                else:
+                    # Infeasible clear core: 0.0 m² usable area (PAC-1 R11-P1-01)
+                    pass
             else:
                 clear_core_area_m2 += r.area_m2
                 clear_face_skirting_gross_m += r.perimeter_cm / 100.0
 
         clear_face_skirting_net_m = round(max(0.0, clear_face_skirting_gross_m - doors_deduction_m), 2)
 
-        # Net physical masonry volume via CSG vertical slab integration in world Z (PAC-1 T08, T09, R10-P1-02)
+        # Net physical masonry volume via CSG vertical slab integration in world Z (PAC-1 T08, T09, R10-P1-02, R11-P1-02)
         try:
             from shapely.geometry import Polygon, LineString
             from shapely.ops import unary_union
@@ -336,6 +340,7 @@ class HomeModel:
             levels_dict = {lvl.id: lvl.elevation_cm for lvl in self.levels}
             z_breaks = set()
             wall_data = []
+            wall_polys = {}
             for w in self.walls.values():
                 lvl_elev = levels_dict.get(w.level_id, 0.0)
                 w_z0 = lvl_elev
@@ -352,11 +357,12 @@ class HomeModel:
                         continue
                     poly = LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)]).buffer(t, cap_style="square")
                 wall_data.append((w, w_z0, w_z1, poly))
+                wall_polys[w.id] = poly
 
             opening_data = []
             for op in self.openings.values():
                 w = self.walls.get(op.wall_id)
-                if not w:
+                if not w or w.id not in wall_polys:
                     continue
                 lvl_elev = levels_dict.get(op.level_id or w.level_id, 0.0)
                 op_z0 = lvl_elev + op.elevation_cm
@@ -368,7 +374,9 @@ class HomeModel:
                     p1 = geom["p1"]
                     p2 = geom["p2"]
                     t_cut = max(w.thickness * 1.5, 30.0)
-                    op_poly = LineString([p1, p2]).buffer(t_cut / 2.0, cap_style="flat")
+                    op_poly_raw = LineString([p1, p2]).buffer(t_cut / 2.0, cap_style="flat")
+                    # R11-P1-02: Clip opening cutout strictly to host wall solid footprint
+                    op_poly = op_poly_raw.intersection(wall_polys[w.id])
                     opening_data.append((op, op_z0, op_z1, op_poly))
 
             sorted_z = sorted(z_breaks)
@@ -598,6 +606,12 @@ class HomeModel:
                 findings.append({"code": "MISSING_LEVEL_REFERENCE", "severity": "error", "entity_ids": [r.id], "message": msg})
 
             if len(r.points) >= 3:
+                clear_poly = r.get_clear_core_polygon(self.walls.values())
+                if clear_poly is not None and clear_poly.is_empty:
+                    msg = f"Room '{r.name}' ({r.id}) has an infeasible clear core (incident walls consume entire room area)."
+                    warnings.append(msg)
+                    findings.append({"code": "INFEASIBLE_ROOM_CORE", "severity": "warning", "entity_ids": [r.id], "message": msg})
+
                 n = len(r.points)
                 has_intersection = False
                 for i in range(n):
@@ -656,7 +670,7 @@ class HomeModel:
             return all(math.isfinite(v) for v in (w.x_start, w.y_start, w.x_end, w.y_end, w.height, w.thickness, w.arc_extent))
 
         def _is_finite_room(r):
-            return all(math.isfinite(p[0]) and math.isfinite(p[1]) for p in r.points)
+            return len(r.points) >= 3 and all(math.isfinite(p[0]) and math.isfinite(p[1]) for p in r.points)
 
         def _is_finite_opening(op):
             vals = [op.offset_cm, op.width_cm, op.height_cm, op.elevation_cm]
@@ -958,7 +972,10 @@ class HomeModel:
                             })
                         if _is_finite_room(r):
                             clear_poly = r.get_clear_core_polygon(self.walls.values())
-                            room_poly = clear_poly if (clear_poly is not None and not clear_poly.is_empty) else Polygon(r.points)
+                            if clear_poly is not None:
+                                room_poly = clear_poly
+                            else:
+                                room_poly = Polygon(r.points)
                             furn_poly = Polygon(_get_furn_corners(f))
                             if not room_poly.buffer(0.01).covers(furn_poly):
                                 outside = furn_poly.difference(room_poly.buffer(0.01))
