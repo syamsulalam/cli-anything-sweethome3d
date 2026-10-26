@@ -1855,6 +1855,148 @@ def test_two_vertex_room_returns_structured_error_without_crash():
     assert "DEGENERATE_ROOM" in codes
     assert "ZERO_AREA_ROOM" in codes
 
+def test_reconcile_missing_staged_session_with_altered_predecessor_fails_closed():
+    """PAC-1 S01, S03, S05, R12-P0-02: Missing staged_session with altered predecessor fails closed and preserves journal."""
+    with tempfile.TemporaryDirectory() as td:
+        sess_file = os.path.join(td, "sess.json")
+        target_file = os.path.join(td, "home.json")
+        m = SessionManager(sess_file)
+        m.new_project("Base")
+        m.save_file(target_file)
+
+        orig_sess_sha = _calc_sha256(sess_file)
+        cand_art = os.path.join(td, "candidate_artifact.json")
+        with open(cand_art, "w") as f:
+            f.write(json.dumps({"model": {"name": "Candidate"}}))
+        cand_art_sha = _calc_sha256(cand_art)
+
+        # Alter current predecessor model on disk while leaving expected_revision intact
+        with open(sess_file, "r", encoding="utf-8") as f:
+            sess_data = json.load(f)
+        sess_data["model"]["name"] = "ALTERED_PREDECESSOR"
+        with open(sess_file, "w", encoding="utf-8") as f:
+            json.dump(sess_data, f)
+
+        pending_rec = {
+            "schema_version": 1,
+            "tx_id": "tx_missing_stage_001",
+            "session_path": os.path.normcase(os.path.abspath(sess_file)),
+            "project_id": "Base",
+            "target": target_file,
+            "tmp_target": cand_art,
+            "candidate_session_sha256": "f" * 64,
+            "candidate_artifact_sha256": cand_art_sha,
+            "base_session_sha256": orig_sess_sha,
+            "base_artifact_sha256": _calc_sha256(target_file),
+            "had_target": True,
+            "backup": target_file + ".bak",
+            "staged_session": os.path.join(td, "nonexistent_stage.json"),
+            "expected_revision": 2,
+            "target_revision": 3
+        }
+        pending_file = sess_file + ".pending"
+        with open(pending_file, "w", encoding="utf-8") as pf:
+            json.dump(pending_rec, pf)
+
+        # Recovery must fail closed: predecessor was altered!
+        m2 = SessionManager(sess_file)
+        assert os.path.exists(pending_file), "Pending journal must NOT be deleted when predecessor is altered!"
+        assert os.path.exists(cand_art), "Candidate artifact must NOT be deleted!"
+
+def test_export_staged_overwritten_by_competing_writer_rejected():
+    """PAC-1 S04, S06, S07, A05, R12-P0-01: Staged export rejected if competing writer claims destination under lock."""
+    import cli_anything.sweethome3d.sweethome3d_cli as cli_mod
+    from cli_anything.sweethome3d.sweethome3d_cli import safe_publish_export
+    import pytest
+    orig_internal = cli_mod._session_mgr
+    with tempfile.TemporaryDirectory() as td:
+        sess_file = os.path.join(td, "sess.json")
+        out_file = os.path.join(td, "active_art.json")
+        try:
+            m = SessionManager(sess_file)
+            m.new_project("EXPORTER_MODEL")
+            cli_mod._session_mgr = m
+
+            # Competing writer function that saves to out_file during export staging
+            def staging_generator(tmp_path):
+                # Write exporter's stage
+                with open(tmp_path, "w") as f:
+                    f.write(json.dumps({"name": "EXPORTER_MODEL"}))
+                
+                # Competing writer runs and commits to out_file
+                writer_m = SessionManager(sess_file)
+                writer_m.new_project("WRITER_MODEL")
+                writer_m.save_file(out_file)
+
+            # Export publication must detect competing writer claiming out_file and reject overwrite
+            with pytest.raises(RuntimeError, match="concurrent writer committed revision.*active artifact"):
+                safe_publish_export(out_file, staging_generator)
+
+            # Assert writer's artifact was NOT overwritten
+            with open(out_file, "r") as f:
+                content = f.read()
+            assert "WRITER_MODEL" in content
+            assert "EXPORTER_MODEL" not in content
+        finally:
+            cli_mod._session_mgr = orig_internal
+
+def test_clear_core_intruding_wall_material_subtracted():
+    """PAC-1 T07, R12-P1-01: Wall material intruding into room is subtracted (exact 11.720 m²)."""
+    m = HomeModel("Intruding Wall")
+    # Room [0, 400] x [0, 300] cm
+    r = m.add_room("r1", "Room", [(0, 0), (400, 0), (400, 300), (0, 300)])
+    # 20cm wall from (0, -3) to (400, -3), occupies Y in [-13, +7] cm (7cm strip inside room)
+    m.add_wall("w_int", 0, -3, 400, -3, thickness=20.0)
+    t = m.takeoff()
+    assert t["summary"]["clear_core_area_m2"] == 11.720
+
+def test_curve_polyline_actual_segments_stay_within_0_01_error():
+    """PAC-1 T05, C03, E02, R12-P1-02: True arc midpoint distance to actual polyline segments <= 0.01cm."""
+    import math
+    from shapely.geometry import LineString, Point
+    from cli_anything.sweethome3d.core.wall import Wall
+
+    w = Wall("w_curve", -90000, 0, 90000, 0, thickness=20.0, arc_extent=90.0)
+    steps = w.get_curve_sampling_steps()
+    
+    # Generate unrounded polyline coordinates
+    pts = [w.point_at_offset(i * w.length / steps, round_coords=False) for i in range(steps + 1)]
+    
+    # Independent circle geometry
+    c = 180000.0
+    theta_rad = math.radians(90.0)
+    sin_half = math.sin(theta_rad / 2.0)
+    R = c / (2.0 * sin_half)
+    h = R * math.cos(theta_rad / 2.0)
+    cx, cy = 0.0, -h
+
+    max_dist = 0.0
+    for i in range(steps):
+        t_mid = (i + 0.5) / steps
+        phi_mid = math.atan2(0 - cy, -90000 - cx) - t_mid * theta_rad
+        mid_pt = Point(cx + R * math.cos(phi_mid), cy + R * math.sin(phi_mid))
+        seg = LineString([pts[i], pts[i + 1]])
+        d = seg.distance(mid_pt)
+        if d > max_dist:
+            max_dist = d
+
+    assert max_dist <= 0.01, f"Max arc segment deviation {max_dist:.6f} cm exceeds 0.01 cm budget!"
+
+def test_collinear_overlapping_walls_noded_into_three_atoms():
+    """PAC-1 T01-T03, R12-P1-03: (0,0)->(300,0) + (150,0)->(450,0) nodes into 3 atoms totaling 4.5m union run."""
+    m = HomeModel("Noded Walls")
+    m.add_wall("w1", 0, 0, 300, 0, thickness=20.0)
+    m.add_wall("w2", 150, 0, 450, 0, thickness=20.0)
+    
+    atoms = m.get_noded_wall_segments()
+    assert len(atoms) == 3
+    assert m.total_noded_wall_length_m == 4.50
+
+    m.node_walls()
+    assert len(m.walls) == 3
+    assert m.total_wall_length_m == 4.50
+
+
 
 
 

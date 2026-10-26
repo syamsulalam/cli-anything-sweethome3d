@@ -260,6 +260,80 @@ class HomeModel:
         """Total run of walls in linear meters."""
         return round(sum(w.length_m for w in self.walls.values()), 2)
 
+    def get_noded_wall_segments(self, level_id=None):
+        """Derives the physical noded wall arrangement across all intersecting/overlapping walls (PAC-1 T01-T03).
+        
+        Splits collinear overlapping walls and T/X-junctions into unique non-overlapping physical atoms.
+        """
+        try:
+            from shapely.geometry import LineString, MultiLineString
+            from shapely.ops import unary_union
+        except ImportError:
+            return []
+        
+        target_walls = [w for w in self.walls.values() if level_id is None or w.level_id == level_id]
+        straight_lines = []
+        for w in target_walls:
+            if abs(getattr(w, "arc_extent", 0.0)) < 1e-4 and w.chord_length > 1e-4:
+                straight_lines.append(LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)]))
+        
+        noded = []
+        if straight_lines:
+            u = unary_union(straight_lines)
+            geoms = u.geoms if hasattr(u, "geoms") else [u]
+            for g in geoms:
+                if isinstance(g, LineString) and g.length > 1e-4:
+                    coords = list(g.coords)
+                    for i in range(len(coords) - 1):
+                        p1, p2 = coords[i], coords[i + 1]
+                        noded.append({
+                            "x_start": round(p1[0], 2),
+                            "y_start": round(p1[1], 2),
+                            "x_end": round(p2[0], 2),
+                            "y_end": round(p2[1], 2),
+                            "length_m": round(math.hypot(p2[0] - p1[0], p2[1] - p1[1]) / 100.0, 3)
+                        })
+        return noded
+
+    @property
+    def total_noded_wall_length_m(self):
+        """Total run of unique physical walls in linear meters without double-counting overlaps (PAC-1 T01-T03)."""
+        try:
+            from shapely.geometry import LineString
+            from shapely.ops import unary_union
+            lines = [LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)]) for w in self.walls.values() if w.chord_length > 1e-4]
+            if not lines:
+                return 0.0
+            return round(unary_union(lines).length / 100.0, 2)
+        except Exception:
+            return self.total_wall_length_m
+
+    def node_walls(self, level_id=None):
+        """Replaces collinear overlapping and intersecting walls with their noded physical atoms (PAC-1 T01-T03)."""
+        target_levels = [level_id] if level_id else [lvl.id for lvl in self.levels]
+        noded_count = 0
+        for lvl in target_levels:
+            atoms = self.get_noded_wall_segments(level_id=lvl)
+            if not atoms:
+                continue
+            lvl_walls = [w for w in self.walls.values() if w.level_id == lvl and abs(getattr(w, "arc_extent", 0.0)) < 1e-4]
+            if not lvl_walls:
+                continue
+            default_t = lvl_walls[0].thickness
+            default_h = lvl_walls[0].height
+            
+            for w in lvl_walls:
+                del self.walls[w.id]
+            
+            for i, atom in enumerate(atoms):
+                atom_id = f"w_{lvl}_node_{i+1}"
+                self.add_wall(
+                    atom_id, atom["x_start"], atom["y_start"], atom["x_end"], atom["y_end"],
+                    thickness=default_t, height=default_h, level_id=lvl
+                )
+                noded_count += 1
+        return noded_count
+
     def takeoff(self):
         """Generates an architectural takeoff / Bill of Quantities (BOQ / RAB) analysis."""
         # 1. Floor & Ceiling Takeoff
@@ -414,6 +488,7 @@ class HomeModel:
 
         summary = {
             "wall_perimeter_m": self.total_wall_length_m,
+            "physical_wall_run_m": self.total_noded_wall_length_m,
             "wall_gross_area_m2": gross_wall_m2,
             "wall_net_area_m2": net_wall_masonry_m2,
             "net_masonry_volume_m3": net_masonry_volume_m3,

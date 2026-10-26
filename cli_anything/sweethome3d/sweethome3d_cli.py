@@ -85,12 +85,16 @@ def assert_safe_export_target(output_path):
 
 def safe_publish_export(output_path, generator_fn):
     """Safely stages an export artifact, acquires exclusive session authority,
-    rechecks destination guards, asserts no pending transaction, and atomically publishes.
-    (PAC-1 S04, S06, S07, A05, R11-P0-02)
+    rechecks destination guards against current authoritative disk context,
+    detects concurrent writer commits, and atomically publishes.
+    (PAC-1 S04, S06, S07, A05, R11-P0-02, R12-P0-01)
     """
     output_path = os.path.abspath(output_path)
     assert_safe_export_target(output_path)
     
+    mgr = get_session_mgr()
+    source_rev = mgr.revision
+
     tx_id = f"{os.getpid()}_{time.time_ns()}"
     tmp_out = output_path + f".tmp_exp_{tx_id}"
     
@@ -99,8 +103,32 @@ def safe_publish_export(output_path, generator_fn):
         generator_fn(tmp_out)
         
         # Step 2: Acquire session lock before publishing
-        mgr = get_session_mgr()
         with mgr.lock():
+            # Read current authoritative session state directly from disk under lock
+            sess_path = mgr.session_path
+            disk_rev = 0
+            disk_active = None
+            if os.path.exists(sess_path) and os.path.getsize(sess_path) > 0:
+                try:
+                    with open(sess_path, "r", encoding="utf-8") as f:
+                        disk_data = json.load(f)
+                        disk_rev = disk_data.get("revision", 0)
+                        disk_active = disk_data.get("active_file")
+                except Exception:
+                    pass
+
+            # R12-P0-01: Detect if a concurrent writer committed while staging
+            if disk_rev > source_rev and disk_active:
+                norm_out = os.path.normcase(os.path.abspath(output_path))
+                norm_active = os.path.normcase(os.path.abspath(disk_active))
+                if norm_out == norm_active:
+                    raise RuntimeError(
+                        f"Cannot publish export to '{output_path}': a concurrent writer committed revision {disk_rev} "
+                        f"claiming this destination as its active artifact."
+                    )
+
+            if disk_active:
+                mgr.active_file = disk_active
             # Recheck destination safety under lock
             assert_safe_export_target(output_path)
             
@@ -414,6 +442,24 @@ def wall_remove(ctx, wall_id):
                 raise ValueError(f"Wall '{wall_id}' not found.")
             session_mgr.save_session()
         output_result(ctx, {"removed": wall_id})
+    except Exception as e:
+        output_error(ctx, str(e))
+
+@wall.command(name="node")
+@click.option("--level", "level_id", default=None, help="Filter by level ID.")
+@click.pass_context
+def wall_node(ctx, level_id):
+    """Node and deduplicate overlapping collinear walls and junctions into atomic physical segments (PAC-1 T01-T03)."""
+    try:
+        with session_mgr.transaction():
+            session_mgr.push_state()
+            count = session_mgr.model.node_walls(level_id=level_id)
+            session_mgr.save_session()
+        output_result(ctx, {
+            "noded_atoms_count": count,
+            "total_wall_length_m": session_mgr.model.total_wall_length_m,
+            "level": level_id or "all"
+        })
     except Exception as e:
         output_error(ctx, str(e))
 

@@ -91,21 +91,22 @@ class Room:
         # Find incident walls on the exact same level
         incident_wall_polys = []
         if walls:
-            room_boundary = poly.boundary
             wall_list = walls.values() if isinstance(walls, dict) else walls
             for w in wall_list:
                 if getattr(w, "level_id", None) != self.level_id:
                     continue
-                w_line = LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)])
-                # Incident check: wall centerline must touch/align with room boundary within 2.0 cm
-                if room_boundary.distance(w_line) <= 2.0:
-                    t = w.thickness / 2.0
-                    if abs(getattr(w, "arc_extent", 0.0)) > 1e-4 and w.length > 0:
-                        steps = w.get_curve_sampling_steps()
-                        pts = [w.point_at_offset(i * w.length / steps) for i in range(steps + 1)]
-                        w_poly = LineString(pts).buffer(t, cap_style="square")
-                    else:
-                        w_poly = LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)]).buffer(t, cap_style="square")
+                t = w.thickness / 2.0
+                if abs(getattr(w, "arc_extent", 0.0)) > 1e-4 and w.length > 0:
+                    steps = w.get_curve_sampling_steps()
+                    pts = [w.point_at_offset(i * w.length / steps) for i in range(steps + 1)]
+                    w_poly = LineString(pts).buffer(t, cap_style="square")
+                else:
+                    if w.chord_length < 1e-4:
+                        continue
+                    w_poly = LineString([(w.x_start, w.y_start), (w.x_end, w.y_end)]).buffer(t, cap_style="square")
+
+                # R12-P1-01: True physical material intersection (subtraction of actual intruding solids)
+                if poly.intersects(w_poly):
                     incident_wall_polys.append(w_poly)
 
         if not incident_wall_polys:

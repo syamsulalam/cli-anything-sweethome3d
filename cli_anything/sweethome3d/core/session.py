@@ -243,56 +243,57 @@ def _reconcile_pending(filepath):
                 pass
         reconciled = True
 
-    # Scenario 2: Candidate session is staged on disk and current revision is expected_revision
-    elif staged_session and os.path.exists(staged_session):
-        # R11-P0-01: Verify current predecessor session file matches base_session_sha256
+    # Universal predecessor verification for all expected-revision branches (PAC-1 S01, S03, S05, R12-P0-02)
+    elif curr_rev == expected_rev:
         if expected_rev > 0:
             base_sess_sha = rec.get("base_session_sha256")
             if not os.path.exists(filepath) or _calc_sha256(filepath) != base_sess_sha:
                 # Predecessor session state altered or corrupted on disk!
-                # Fail closed: preserve journal evidence and abort recovery.
+                # Fail closed: preserve journal and all staged evidence across ALL recovery branches.
                 return
 
-        # P0-01: Verify staged session matches candidate_session_sha256
-        staged_sess_sha = _calc_sha256(staged_session)
-        if staged_sess_sha != cand_sess_sha:
-            # Staged session corrupted/altered! Cannot roll forward, roll back to base
-            reconciled = _rollback_to_base(rec)
-        else:
-            target_sha = _calc_sha256(target) if (target and os.path.exists(target)) else None
-            tmp_target_sha = _calc_sha256(tmp_target) if (tmp_target and os.path.exists(tmp_target)) else None
-
-            artifact_ready = False
-            if target_sha == cand_art_sha:
-                # Target was already published before crash
-                artifact_ready = True
-            elif tmp_target and os.path.exists(tmp_target) and tmp_target_sha == cand_art_sha:
-                # Target was NOT replaced yet, but staged candidate artifact matches candidate hash: complete artifact replacement!
-                try:
-                    os.replace(tmp_target, target)
-                    artifact_ready = True
-                except Exception:
-                    artifact_ready = False
-
-            if artifact_ready:
-                # Complete session publication to match candidate artifact!
-                try:
-                    os.replace(staged_session, filepath)
-                    if backup and os.path.exists(backup):
-                        try:
-                            os.remove(backup)
-                        except OSError:
-                            pass
-                    reconciled = True
-                except Exception:
-                    reconciled = False
-            else:
-                # Candidate artifact could not be completed. We MUST roll back both session and artifact to base!
+        # Scenario 2: Candidate session is staged on disk and current revision is expected_revision
+        if staged_session and os.path.exists(staged_session):
+            # P0-01: Verify staged session matches candidate_session_sha256
+            staged_sess_sha = _calc_sha256(staged_session)
+            if staged_sess_sha != cand_sess_sha:
+                # Staged session corrupted/altered! Cannot roll forward, roll back to base
                 reconciled = _rollback_to_base(rec)
+            else:
+                target_sha = _calc_sha256(target) if (target and os.path.exists(target)) else None
+                tmp_target_sha = _calc_sha256(tmp_target) if (tmp_target and os.path.exists(tmp_target)) else None
 
-    # Scenario 3: Staged session does not exist (roll back to base)
-    else:
-        reconciled = _rollback_to_base(rec)
+                artifact_ready = False
+                if target_sha == cand_art_sha:
+                    # Target was already published before crash
+                    artifact_ready = True
+                elif tmp_target and os.path.exists(tmp_target) and tmp_target_sha == cand_art_sha:
+                    # Target was NOT replaced yet, but staged candidate artifact matches candidate hash: complete artifact replacement!
+                    try:
+                        os.replace(tmp_target, target)
+                        artifact_ready = True
+                    except Exception:
+                        artifact_ready = False
+
+                if artifact_ready:
+                    # Complete session publication to match candidate artifact!
+                    try:
+                        os.replace(staged_session, filepath)
+                        if backup and os.path.exists(backup):
+                            try:
+                                os.remove(backup)
+                            except OSError:
+                                pass
+                        reconciled = True
+                    except Exception:
+                        reconciled = False
+                else:
+                    # Candidate artifact could not be completed. We MUST roll back both session and artifact to base!
+                    reconciled = _rollback_to_base(rec)
+
+        # Scenario 3: Staged session does not exist (roll back to base)
+        else:
+            reconciled = _rollback_to_base(rec)
 
     if reconciled:
         try:

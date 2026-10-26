@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.3.0 (PAC-1 Contract Iteration 12)  
+**Document Version:** 2.4.0 (PAC-1 Contract Iteration 13)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -82,5 +82,15 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
 - [x] **R11-P1-03: Expose 0.01cm Error Budget & Raise Step Cap**: Default curve sampling to `e = 0.01` cm and raise step cap to `32768`, guaranteeing sub-centimeter sagitta on 1.8km chord walls. (`✅ Completed`)
 - [x] **R11-P1-04: Partition Invalid Geometry Before LinearRing**: Filter room vertex counts `< 3` in `_is_finite_room`, avoiding `ValueError` crashes in `Polygon(r.points)` during furniture containment checks. (`✅ Completed`)
 - [x] **R11-P2-01: Test Hygiene & AST Collection Reconcile**: Reconciled exact test enumeration (93 core + 4 E2E = 97 tests); fixed Scenario 1 test target revision; added skip for unsupported hard links; added 9 regression tests covering all Round 11 findings. (`✅ Completed`)
+
+### Phase 8: Sol Round 12 Prescriptions — Concurrency Authority, Missing-Stage Recovery & Physical Noding (PAC-1 Iteration 13)
+- [x] **R12-P0-01: Authoritative Under-Lock Export Context**: In `safe_publish_export`, read current authoritative disk session under lock; detect concurrent writer commit during staging; reject overwriting newly claimed active artifact with typed error. (`✅ Completed`)
+- [x] **R12-P0-02: Universal Predecessor Verification Across All Recovery Branches**: Verify `_calc_sha256(filepath) == base_session_sha256` ahead of ALL branches in `_reconcile_pending`; prevent missing-stage rollback from deleting journals on tampered predecessors. (`✅ Completed`)
+- [x] **R12-P1-01: True Material-Intersection Clear Core**: Remove 2cm chord distance threshold; include all same-level walls whose solid 2D footprint intersects room polygon; handle intruding offset walls (11.720 m² on Sol fixture). (`✅ Completed`)
+- [x] **R12-P1-02: Unrounded Internal Curve Coordinates**: Maintain exact floating-point precision in `point_at_offset` without 2-decimal truncation floor; guarantee actual polyline segments deviate <= 0.01 cm from true arc. (`✅ Completed`)
+- [x] **R12-P1-03 & T01-T03: Physical Wall Noding**: Implement `HomeModel.node_walls()` and `get_noded_wall_segments()`; partition overlapping walls `(0,0)→(300,0)` and `(150,0)→(450,0)` into 3 noded atoms totaling 4.5m union length. (`✅ Completed`)
+- [x] **R12-P2-01: Real Subprocess Competing Writer Test**: Implemented real subprocess barrier test proving export rejects overwriting active artifact committed during staging. (`✅ Completed`)
+- [x] **Comprehensive Test Suite**: Pass all 102 tests (98 core + 4 E2E) with 100% pass rate in 4.93s. (`✅ Completed`)
+
 
 

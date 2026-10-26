@@ -85,10 +85,12 @@ class Wall:
         deg = math.degrees(self.angle_rad) % 360.0
         return round(deg, 1)
 
-    def point_at_offset(self, offset_cm):
+    def point_at_offset(self, offset_cm, round_coords=False):
         """Returns (x, y) along the wall center line at a given offset from start.
         
         For curved walls with `arc_extent != 0`, computes exact points along circular arc.
+        R12-P1-02: Returns unrounded exact float coordinates by default to satisfy
+        the 0.01cm numerical representation budget.
         """
         l = self.length
         if l == 0:
@@ -98,7 +100,7 @@ class Wall:
         if not math.isfinite(self.arc_extent) or abs(self.arc_extent) < 1e-4 or abs(self.arc_extent) >= 360.0:
             x = self.x_start + t * (self.x_end - self.x_start)
             y = self.y_start + t * (self.y_end - self.y_start)
-            return (round(x, 2), round(y, 2))
+            return (round(x, 2), round(y, 2)) if round_coords else (x, y)
 
         # Circular arc interpolation
         c = self.chord_length
@@ -111,7 +113,7 @@ class Wall:
         if abs(sin_alpha) < 1e-6:
             x = self.x_start + t * (self.x_end - self.x_start)
             y = self.y_start + t * (self.y_end - self.y_start)
-            return (round(x, 2), round(y, 2))
+            return (round(x, 2), round(y, 2)) if round_coords else (x, y)
 
         r = c / (2.0 * sin_alpha)
         h = r * math.cos(alpha)
@@ -134,7 +136,7 @@ class Wall:
         phi_t = phi1 - t * theta_rad
         x = cx + r * math.cos(phi_t)
         y = cy + r * math.sin(phi_t)
-        return (round(x, 2), round(y, 2))
+        return (round(x, 2), round(y, 2)) if round_coords else (x, y)
 
     def get_arc_extrema(self):
         """Returns list of exact (x, y) coordinates for all cardinal extrema reached along curved arc."""
@@ -187,7 +189,7 @@ class Wall:
         if not math.isfinite(R) or R < 1e-4:
             return 16
         if error_tol is None:
-            e = 0.01  # PAC-1 declared linear error budget (0.01 cm)
+            e = 0.008  # PAC-1 declared linear error budget (<= 0.01 cm total representation bound)
         else:
             e = max(0.001, float(error_tol))
         ratio = max(-1.0, min(1.0, 1.0 - (e / R)))
