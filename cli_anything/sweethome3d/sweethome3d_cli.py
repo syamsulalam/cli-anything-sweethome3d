@@ -1068,7 +1068,7 @@ def capability_cmd(ctx):
 @cli.command(name="doctor")
 @click.pass_context
 def doctor_cmd(ctx):
-    """Runs comprehensive environment, session journal, and geometry diagnostics (Gate A08, R21-P1-03)."""
+    """Runs comprehensive environment, session journal, and geometry diagnostics (Gate A08, R21-P1-03, R22-P1-02)."""
     shapely_ok = False
     try:
         import shapely
@@ -1076,19 +1076,9 @@ def doctor_cmd(ctx):
     except (ImportError, Exception):
         shapely_ok = False
 
-    mgr = None
-    session_path = None
-    session_load_err = None
-
-    try:
-        if _session_mgr is not None:
-            mgr = _session_mgr
-            session_path = getattr(mgr, "session_path", None)
-        else:
-            mgr = get_session_mgr()
-            session_path = getattr(mgr, "session_path", None)
-    except Exception as exc:
-        session_load_err = str(exc)
+    # Status-only doctor must NEVER instantiate SessionManager if it triggers recovery/reconciliation
+    mgr = _session_mgr
+    session_path = getattr(mgr, "session_path", None) if mgr else None
 
     if not session_path:
         session_path = getattr(sys.modules.get(__name__), "SESSION_FILE", None) or getattr(session_module, "SESSION_FILE", None) or os.path.expanduser("~/.cli_anything_sweethome3d_session.json")
@@ -1100,18 +1090,21 @@ def doctor_cmd(ctx):
     model_valid = True
     model_findings = []
 
-    if session_load_err:
-        model_valid = False
-        model_findings.append({"code": "SESSION_CORRUPT", "severity": "error", "message": session_load_err})
-    elif session_exists:
+    if session_exists:
         try:
             with open(session_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if isinstance(data, dict) and "model" in data:
-                    model = HomeModel.from_dict(data["model"])
-                    val = model.validate()
-                    model_valid = val.get("valid", True)
-                    model_findings = val.get("findings", [])
+            if not isinstance(data, dict):
+                model_valid = False
+                model_findings.append({"code": "INVALID_SESSION_SHAPE", "severity": "error", "message": "Session JSON root must be an object"})
+            elif "model" not in data or not isinstance(data["model"], dict):
+                model_valid = False
+                model_findings.append({"code": "MISSING_SESSION_MODEL", "severity": "error", "message": "Session JSON missing 'model' object"})
+            else:
+                model = HomeModel.from_dict(data["model"])
+                val = model.validate()
+                model_valid = val.get("valid", True)
+                model_findings = val.get("findings", [])
         except Exception as e:
             model_valid = False
             model_findings.append({"code": "SESSION_CORRUPT", "severity": "error", "message": str(e)})

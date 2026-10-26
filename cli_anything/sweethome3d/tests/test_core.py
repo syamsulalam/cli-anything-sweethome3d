@@ -1,6 +1,8 @@
 import os
+import sys
 import math
 import builtins
+import subprocess
 import tempfile
 import zipfile
 import json
@@ -3119,6 +3121,105 @@ def test_doctor_reports_corrupt_session_as_finite_json(tmp_path, monkeypatch):
     else:
         assert payload['data']['healthy'] is False
     assert session.read_bytes() == b'{corrupt'
+
+
+# ==============================================================================
+# Round 22 Acceptance Oracles
+# ==============================================================================
+
+@pytest.mark.parametrize('case', ['conflicting_operation', 'unknown_owned_version'])
+def test_metadata_cannot_silently_override_physical_native_sash(case):
+    root = ET.Element('home', version='7400')
+    ET.SubElement(root, 'level', id='level1', name='Ground', elevation='0',
+                  floorThickness='12', height='280')
+    door = ET.SubElement(root, 'doorOrWindow', id='door', name='Native',
+                         level='level1', x='100', y='0', angle='0',
+                         width='200', depth='20', height='210')
+    source = ((0, .5, 1, 0, -math.pi / 2) if case == 'conflicting_operation'
+              else (1, .5, 1, math.pi, 3 * math.pi / 2))
+    keys = ('xAxis', 'yAxis', 'width', 'startAngle', 'endAngle')
+    ET.SubElement(door, 'sash', **dict(zip(keys, map(str, source))))
+    meta = {'version': 1 if case == 'conflicting_operation' else 2,
+            'kind': 'door', 'operation': 'left', 'host_id': None, 'offset_cm': 0}
+    ET.SubElement(door, 'property', name='cli-anything.opening.v1', value=json.dumps(meta))
+    try:
+        m = HomeModel.from_xml(ET.tostring(root, encoding='unicode'))
+        m = HomeModel.from_dict(json.loads(json.dumps(m.to_dict())))
+        sashes = ET.fromstring(m.to_xml()).findall('doorOrWindow/sash')
+    except ValueError as exc:
+        assert any(w in str(exc).lower() for w in
+                   ('sash', 'operation', 'metadata', 'unsupported', 'version'))
+        return
+    assert len(sashes) == 1
+    actual = tuple(float(sashes[0].get(k)) for k in keys)
+    assert abs(actual[0] - source[0]) * 200 <= .01
+    assert abs(actual[1] - source[1]) * 20 <= .01
+    assert abs(actual[2] - source[2]) * 200 <= .01
+    for i in (3, 4):
+        delta = (actual[i] - source[i] + math.pi) % (2 * math.pi) - math.pi
+        assert 2 * 200 * abs(math.sin(delta / 2)) <= .01
+
+
+@pytest.mark.parametrize('raw', ['[]', '{}'], ids=['array_root', 'missing_model'])
+def test_doctor_rejects_invalid_session_shape_with_warm_manager(tmp_path, monkeypatch, raw):
+    session = tmp_path / 'session.json'
+    mgr = SessionManager(str(session))
+    mgr.save_session()
+    session.write_text(raw, encoding='utf-8')
+    monkeypatch.setattr(cli_module, '_session_mgr', mgr)
+    result = CliRunner().invoke(cli_module.cli, ['--json', 'doctor'])
+    assert result.output.strip(), repr(result.exception)
+    payload = json.loads(result.output)
+    assert payload['data']['healthy'] is False
+    assert payload['data']['checks']['model_valid'] is False
+    assert any(f.get('severity') == 'error' for f in payload['data']['findings'])
+    assert session.read_text(encoding='utf-8') == raw
+
+
+def test_cold_doctor_does_not_apply_valid_pending_recovery(tmp_path, monkeypatch):
+    session = tmp_path / 'session.json'
+    artifact = tmp_path / 'home.json'
+    writer = SessionManager(str(session))
+    writer.new_project('base')
+    writer.save_file(str(artifact))
+    child = r'''
+import os, sys
+from cli_anything.sweethome3d.core.session import SessionManager
+mgr = SessionManager(sys.argv[1])
+mgr.model.name = 'candidate'
+target = os.path.normcase(os.path.abspath(sys.argv[2]))
+real_replace = os.replace
+def replace_then_exit(src, dst):
+    result = real_replace(src, dst)
+    if os.path.normcase(os.path.abspath(dst)) == target:
+        os._exit(71)
+    return result
+os.replace = replace_then_exit
+mgr.save_file(sys.argv[2])
+'''
+    proc = subprocess.run([sys.executable, '-c', child, str(session), str(artifact)],
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 71, proc.stdout + proc.stderr
+    journal = Path(str(session) + '.pending')
+    assert journal.exists()
+    record = json.loads(journal.read_text(encoding='utf-8'))
+    paths = {session, artifact, journal}
+    for key in ('tmp_target', 'staged_session', 'backup'):
+        if record.get(key):
+            paths.add(Path(record[key]))
+    before = {p: p.read_bytes() if p.exists() else None for p in paths}
+    monkeypatch.setattr(cli_module, '_session_mgr', None)
+    monkeypatch.setattr(cli_module, 'SessionManager', lambda: SessionManager(str(session)))
+    monkeypatch.setattr(cli_module, 'SESSION_FILE', str(session))
+    monkeypatch.setattr(session_module, 'SESSION_FILE', str(session))
+    result = CliRunner().invoke(cli_module.cli, ['--json', 'doctor'])
+    assert result.output.strip(), repr(result.exception)
+    after = {p: p.read_bytes() if p.exists() else None for p in paths}
+    assert after == before, 'Status-only doctor applied recovery or deleted its evidence'
+    payload = json.loads(result.output)
+    assert payload['data']['healthy'] is False
+    assert payload['data']['checks']['pending_journal'] is True
+
 
 
 

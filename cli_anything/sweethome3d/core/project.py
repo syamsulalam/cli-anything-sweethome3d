@@ -2176,15 +2176,22 @@ class HomeModel:
             if meta_prop is not None and meta_prop.attrib.get("value"):
                 try:
                     meta = json.loads(meta_prop.attrib["value"])
-                    if isinstance(meta, dict) and meta.get("version") == 1:
-                        op_type = meta.get("kind", op_type)
-                        swing = meta.get("operation", swing)
-                        if meta.get("host_id"):
-                            wall_id = meta["host_id"]
-                        if meta.get("offset_cm") is not None:
-                            offset_cm = float(meta["offset_cm"])
-                except Exception:
-                    pass
+                except Exception as e:
+                    raise ValueError(f"Corrupt cli-anything.opening metadata on door '{op_id}': {e}") from e
+
+                if not isinstance(meta, dict) or meta.get("version") != 1:
+                    raise ValueError(f"Unsupported cli-anything.opening metadata version {meta.get('version') if isinstance(meta, dict) else type(meta)}; import refused")
+
+                meta_op = meta.get("operation")
+                if native_swing is not None and meta_op is not None and meta_op != native_swing:
+                    raise ValueError(f"Metadata operation '{meta_op}' conflicts with native sash operation '{native_swing}' on door '{op_id}'; import refused")
+
+                op_type = meta.get("kind", op_type)
+                swing = meta_op if meta_op is not None else (native_swing or swing)
+                if meta.get("host_id"):
+                    wall_id = meta["host_id"]
+                if meta.get("offset_cm") is not None:
+                    offset_cm = float(meta["offset_cm"])
             elif native_swing is not None:
                 swing = native_swing
             else:

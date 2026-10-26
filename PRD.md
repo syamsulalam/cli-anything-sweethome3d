@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.13.0 (PAC-1 Contract Iteration 22)  
+**Document Version:** 2.14.0 (PAC-1 Contract Iteration 23)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -246,6 +246,18 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
 - [x] **Reconciled Test Suite**:
   - Pass all 7 Round 21 acceptance oracles from `REPORT/2026-10-26_SweetHome3D_CLI_Round21_Acceptance_Oracles.py`.
   - Verify full repository test suite: **176 total tests passing in 7.58s** (172 core + 4 E2E; 100% green). (`✅ Completed`)
+
+### Phase 18: Sol Round 22 Prescriptions — Metadata Consistency Invariant & Non-Mutating Diagnostic Doctor (PAC-1 Iteration 23)
+- [x] **R22-P1-01: Owned Metadata Consistency Invariant & Refusal on Conflict (Gates N07, N09, E02)**:
+  - In `HomeModel.from_xml()`, validate `cli-anything.opening.v1` metadata version (enforcing version 1, refusing unknown versions with `ValueError`).
+  - Refuse import (`ValueError`) if `meta.operation` conflicts with verified physical native sash operation (`native_swing`), preventing metadata from silently flipping door handedness. (`✅ Completed`)
+- [x] **R22-P1-02: Non-Mutating Doctor Diagnostics & Session Root Schema Validation (Gates A04, A08, S06, S12)**:
+  - Never construct recovery-capable `SessionManager()` in `doctor_cmd`; inspect files directly on disk via `open()` to ensure doctor remains strictly read-only and never auto-applies recovery or deletes `session.json.pending`.
+  - Validate root session JSON schema shape: reject non-dict roots (`[]`) with `INVALID_SESSION_SHAPE` and missing `model` objects (`{}`) with `MISSING_SESSION_MODEL`. (`✅ Completed`)
+- [x] **Reconciled Test Suite**:
+  - Pass all 5 Round 22 acceptance oracles from `REPORT/2026-10-26_SweetHome3D_CLI_Round22_Acceptance_Oracles.py`.
+  - Verify full repository test suite: **181 total tests passing in 7.54s** (177 core + 4 E2E; 100% green). (`✅ Completed`)
+
 
 
 
