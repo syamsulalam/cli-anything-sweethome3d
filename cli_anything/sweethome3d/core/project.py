@@ -575,41 +575,74 @@ class HomeModel:
             return True
         return False
 
-    def reverse_wall(self, wall_id):
-        """Reverses a wall's direction while preserving physical opening geometry and normalizing face intent (PAC-1 T06)."""
+    def _prepare_wall_edit(self, wall_id):
         wall_id = str(wall_id)
         if wall_id not in self.walls:
-            raise ValueError(f"Wall '{wall_id}' not found in project.")
+            raise ValidationRejectedError(f"Wall '{wall_id}' not found in project.")
         wall = self.walls[wall_id]
-        total_len = wall.length
 
-        # Atomic rollback snapshots across all direct objects (PAC-1 T06, R30)
+        def finite(value, label):
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValidationRejectedError(f"{label} must be numeric") from exc
+            if not math.isfinite(number):
+                raise ValidationRejectedError(f"{label} must be finite")
+            return number
+
+        finite(wall.x_start, "wall x_start")
+        finite(wall.y_start, "wall y_start")
+        finite(wall.x_end, "wall x_end")
+        finite(wall.y_end, "wall y_end")
+        th = finite(wall.thickness, "wall thickness")
+        if th <= 0:
+            raise ValidationRejectedError("wall thickness must be positive")
+        h0 = finite(wall.height, "wall height")
+        if h0 <= 0:
+            raise ValidationRejectedError("wall height must be positive")
+        finite(wall.arc_extent, "wall arc_extent")
+
+        L = finite(wall.length, "wall length")
+        if L <= 0:
+            raise ValidationRejectedError("wall length must be positive")
+
+        h1_val = wall.extra_attribs.get("heightAtEnd", wall.height) if wall.extra_attribs else wall.height
+        h1 = finite(h1_val, "heightAtEnd")
+        if h1 <= 0:
+            raise ValidationRejectedError("heightAtEnd must be positive")
+
+        hosted_openings = [op for op in self.openings.values() if op.wall_id == wall_id]
+        door_poses = {}
+        for op in hosted_openings:
+            o = finite(op.offset_cm, f"opening {op.id} offset")
+            w = finite(op.width_cm, f"opening {op.id} width")
+            finite(op.height_cm, f"opening {op.id} height")
+            finite(op.elevation_cm, f"opening {op.id} elevation")
+            if o < -1e-4 or w <= 0 or o + w > L + 1e-4:
+                raise ValidationRejectedError(f"opening {op.id} interval outside host")
+            try:
+                pose = op.get_effective_geometry(wall)
+                door_poses[op.id] = pose
+            except Exception as exc:
+                raise ValidationRejectedError(f"opening {op.id} physical pose unresolvable") from exc
+
+        return wall, L, h1, door_poses
+
+    def reverse_wall(self, wall_id):
+        """Reverses a wall's direction while preserving physical opening geometry and normalizing face intent (PAC-1 T06, R30, R31)."""
+        wall, total_len, h1, door_poses = self._prepare_wall_edit(wall_id)
+
+        # Atomic rollback snapshots across all direct objects (PAC-1 T06, R30, R31)
         old_walls, old_openings = dict(self.walls), dict(self.openings)
         states = [(obj, copy.deepcopy(obj.__dict__))
                   for obj in [*old_walls.values(), *old_openings.values()]]
 
         try:
-            # Pre-validate all opening intervals upfront without silent clamping
-            for op in self.openings.values():
-                if op.wall_id == wall_id:
-                    if op.offset_cm < 0.0 or op.width_cm < 0.0 or (op.offset_cm + op.width_cm) > total_len + 1e-4:
-                        raise ValueError(f"Opening '{op.id}' interval [{op.offset_cm}, {op.offset_cm + op.width_cm}] exceeds wall length {total_len}")
-                    new_offset = total_len - op.offset_cm - op.width_cm
-                    if new_offset < -1e-4:
-                        raise ValueError(f"Opening '{op.id}' reversed interval would be negative: {new_offset}")
-
-            # Pre-validate sloped height if present before changing object state
+            # Update sloped height if present
             if "heightAtEnd" in wall.extra_attribs:
                 old_h = wall.height
-                old_h_end = float(wall.extra_attribs["heightAtEnd"])
-                wall.height = old_h_end
+                wall.height = h1
                 wall.extra_attribs["heightAtEnd"] = str(round(old_h, 4))
-
-            # Pre-resolve door physical poses before changing coordinates
-            door_poses = {}
-            for op in self.openings.values():
-                if op.wall_id == wall_id:
-                    door_poses[op.id] = op.get_effective_geometry(wall)
 
             # Invert coordinates
             wall.x_start, wall.x_end = wall.x_end, wall.x_start
@@ -622,15 +655,13 @@ class HomeModel:
                 if op.wall_id == wall_id:
                     new_offset = total_len - op.offset_cm - op.width_cm
                     if new_offset < -1e-4 or new_offset + op.width_cm > total_len + 1e-4:
-                        raise ValueError(f"Opening '{op.id}' reversed interval out of bounds: {new_offset}")
+                        raise ValidationRejectedError(f"Opening '{op.id}' reversed interval out of bounds: {new_offset}")
                     op.offset_cm = round(new_offset, 4)
-                    # Pin all 3 resolved pose fields (center and physical angle) unconditionally
                     if op.id in door_poses and door_poses[op.id]:
                         p = door_poses[op.id]
                         op.x_cm = p["center"][0]
                         op.y_cm = p["center"][1]
                         op.angle_deg = p["angle_deg"]
-                    # Keep op.swing unchanged; absolute pose preserves hinge and sweep
 
             # Normalize physical face intent (swap left and right finishes)
             side_pairs = [
@@ -689,54 +720,43 @@ class HomeModel:
             raise
 
     def split_wall(self, wall_id, split_offset_cm, new_wall_id=None):
-        """Splits a wall into two contiguous collinear segments at split_offset_cm (PAC-1 T06).
+        """Splits a wall into two contiguous collinear segments at split_offset_cm (PAC-1 T06, R30, R31).
 
         Re-anchors hosted openings and retargets native joins. Rejects split across an opening or non-finite inputs.
         """
-        wall_id = str(wall_id)
-        if wall_id not in self.walls:
-            raise ValueError(f"Wall '{wall_id}' not found in project.")
+        wall, total_len, h1, door_poses = self._prepare_wall_edit(wall_id)
+
         try:
             split_s = float(split_offset_cm)
         except (ValueError, TypeError) as exc:
-            raise ValueError(f"Invalid split offset: {exc}") from exc
+            raise ValidationRejectedError(f"Invalid split offset: {exc}") from exc
         if not math.isfinite(split_s):
-            raise ValueError(f"Split offset must be finite number, got {split_offset_cm}")
+            raise ValidationRejectedError(f"Split offset must be finite number, got {split_offset_cm}")
 
-        wall = self.walls[wall_id]
-        total_len = wall.length
         if split_s <= 1e-4 or split_s >= total_len - 1e-4:
-            raise ValueError(f"Split offset {split_s} must be strictly inside wall (length {total_len})")
+            raise ValidationRejectedError(f"Split offset {split_s} must be strictly inside wall (length {total_len})")
 
         # Check if split point falls inside any opening
         for op in self.openings.values():
-            if op.wall_id == wall_id:
+            if op.wall_id == wall.id:
                 op_start = op.offset_cm
                 op_end = op.offset_cm + op.width_cm
                 if op_start < split_s < op_end:
-                    raise ValueError(f"Cannot split wall across opening '{op.id}' [{op_start}, {op_end}]")
+                    raise ValidationRejectedError(f"Cannot split wall across opening '{op.id}' [{op_start}, {op_end}]")
 
-        new_id = str(new_wall_id or f"{wall_id}_seg2")
+        new_id = str(new_wall_id or f"{wall.id}_seg2")
         if new_id in self.walls:
             raise EntityConflictError(f"Wall ID '{new_id}' already exists in project.")
 
-        # Atomic rollback snapshot across direct objects (PAC-1 T06, R30)
+        # Atomic rollback snapshot across direct objects (PAC-1 T06, R30, R31)
         old_walls, old_openings = dict(self.walls), dict(self.openings)
         states = [(obj, copy.deepcopy(obj.__dict__))
                   for obj in [*old_walls.values(), *old_openings.values()]]
 
         try:
-            # Pre-validate sloped wall height if present before changing object state
             old_h0 = wall.height
-            old_h1 = old_h0
-            has_slope = "heightAtEnd" in wall.extra_attribs
-            if has_slope:
-                old_h1_str = wall.extra_attribs.get("heightAtEnd")
-                if old_h1_str is not None:
-                    old_h1 = float(old_h1_str)
-                    if not math.isfinite(old_h1):
-                        raise ValueError("heightAtEnd must be finite")
-                ha = old_h0 + (old_h1 - old_h0) * (split_s / total_len)
+            old_h1 = h1
+            ha = old_h0 + (old_h1 - old_h0) * (split_s / total_len)
 
             split_pt = wall.point_at_offset(split_s)
             old_x_end = wall.x_end
@@ -750,7 +770,7 @@ class HomeModel:
                 x_end=old_x_end,
                 y_end=old_y_end,
                 thickness=wall.thickness,
-                height=wall.height,
+                height=ha,
                 level_id=wall.level_id,
                 arc_extent=0.0,
                 extra_attribs=dict(wall.extra_attribs),
@@ -758,31 +778,36 @@ class HomeModel:
             )
             if wall.arc_extent != 0.0:
                 frac = (total_len - split_s) / total_len
-                wall2.arc_extent = wall.arc_extent * frac
-                wall.arc_extent = wall.arc_extent * (split_s / total_len)
+                wall2.arc_extent = round(wall.arc_extent * frac, 4)
+                wall.arc_extent = round(wall.arc_extent * (split_s / total_len), 4)
 
-            # Update first segment to end at split_pt
+            # Update slope on wall2 and wall1
+            has_slope = "heightAtEnd" in wall.extra_attribs
+            if has_slope:
+                wall2.extra_attribs["heightAtEnd"] = str(round(old_h1, 4))
+                wall.extra_attribs["heightAtEnd"] = str(round(ha, 4))
+
+            # Truncate original wall: ends at split_pt
             wall.x_end = split_pt[0]
             wall.y_end = split_pt[1]
 
-            # Apply interpolated sloped wall heights
-            if has_slope:
-                wall.height = old_h0
-                wall.extra_attribs["heightAtEnd"] = str(round(ha, 4))
-                wall2.height = ha
-                wall2.extra_attribs["heightAtEnd"] = str(round(old_h1, 4))
+            # Retarget neighbor joins
+            if "wallAtEnd" in wall.extra_attribs:
+                end_neighbor = wall.extra_attribs.pop("wallAtEnd")
+                wall2.extra_attribs["wallAtEnd"] = end_neighbor
+                if end_neighbor in self.walls:
+                    nbr = self.walls[end_neighbor]
+                    if nbr.extra_attribs.get("wallAtStart") == wall_id:
+                        nbr.extra_attribs["wallAtStart"] = new_id
+                    elif nbr.extra_attribs.get("wallAtEnd") == wall_id:
+                        nbr.extra_attribs["wallAtEnd"] = new_id
 
-            # Retarget native endpoint joins:
-            # wall2 inherits old wallAtEnd, and internal reciprocal joins connect wall <-> wall2
-            old_end_join = wall.extra_attribs.pop("wallAtEnd", None)
-            if old_end_join is not None:
-                wall2.extra_attribs["wallAtEnd"] = old_end_join
             wall.extra_attribs["wallAtEnd"] = new_id
             wall2.extra_attribs["wallAtStart"] = wall_id
 
-            # Retarget any neighboring wall pointing to wall_id at the old end
-            for other in self.walls.values():
-                if other.id != wall_id and other.id != new_id:
+            # Retarget any other walls in the project that had wallAtStart or wallAtEnd pointing to wall_id's old end
+            for other_id, other in self.walls.items():
+                if other_id != wall_id and other_id != new_id:
                     if other.extra_attribs.get("wallAtStart") == wall_id:
                         if math.hypot(other.x_start - old_x_end, other.y_start - old_y_end) < 1.0:
                             other.extra_attribs["wallAtStart"] = new_id
@@ -797,6 +822,11 @@ class HomeModel:
                 if op.wall_id == wall_id and op.offset_cm >= split_s:
                     op.wall_id = new_id
                     op.offset_cm = round(op.offset_cm - split_s, 4)
+                    if op.id in door_poses and door_poses[op.id]:
+                        p = door_poses[op.id]
+                        op.x_cm = p["center"][0]
+                        op.y_cm = p["center"][1]
+                        op.angle_deg = p["angle_deg"]
 
             return wall, wall2
         except Exception:

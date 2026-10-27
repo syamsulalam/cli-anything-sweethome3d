@@ -228,7 +228,7 @@ def output_result(ctx, data, human_formatter=None, include_project=True):
         skin.success(str(data))
 
 def classify_error(exc_or_msg):
-    """Maps errors to PAC-1 typed exit codes and machine-readable error codes (PAC-1 A04, R28-P1-05, R30)."""
+    """Maps errors to PAC-1 typed exit codes and machine-readable error codes (PAC-1 A04, R28-P1-05, R30, R31)."""
     # 1. Type hierarchy checking first (exception identity precedes message words)
     if isinstance(exc_or_msg, BaseException):
         chain, seen = [], set()
@@ -252,20 +252,31 @@ def classify_error(exc_or_msg):
             if any(isinstance(item, typ) for item in chain):
                 return result
 
+        msg_str = str(exc_or_msg)
+        # Bounded legacy compatibility for exact fixed prefixes on raw ValueError:
+        if msg_str.startswith("Unsupported project format") or msg_str.startswith("Unsupported dialect"):
+            return 5, "UNSUPPORTED"
+        if msg_str.startswith("Split offset must be finite") or msg_str.startswith("Validation rejected:"):
+            return 3, "VALIDATION_REJECTED"
+
+        # Unknown internal exception returns 1, ERROR without substring pollution
+        return 1, "ERROR"
+
     msg = str(exc_or_msg)
     msg_lower = msg.lower()
 
-    # 2. String/message fallback patterns for legacy callers
-    if "unresolved recovery journal" in msg or "RECOVERY_REQUIRED" in msg:
+    # 2. String/message fallback patterns only for non-exception strings
+    if "recovery_required" in msg_lower or "unresolved recovery journal" in msg_lower:
         return 7, "RECOVERY_REQUIRED"
-    if "already exists in project" in msg_lower or "entityconflicterror" in msg_lower or "conflict" in msg_lower:
+    if "already exists in project" in msg_lower or "entityconflicterror" in msg_lower or "concurrencyconflicterror" in msg_lower:
         return 4, "CONFLICT"
     if "unsupported dialect" in msg_lower or "unsupported project format" in msg_lower or "unsupported feature" in msg_lower:
         return 5, "UNSUPPORTED"
-    if "access denied" in msg_lower or "permission denied" in msg_lower or "no such file" in msg_lower or "not found" in msg_lower:
+    if "access denied" in msg_lower or "permission denied" in msg_lower or "no such file" in msg_lower:
         return 6, "IO_ERROR"
     if (
         "validation rejected" in msg_lower
+        or "validationrejectederror" in msg_lower
         or "invalid split offset" in msg_lower
         or "cannot split wall across" in msg_lower
         or "exceeds wall length" in msg_lower
@@ -433,7 +444,7 @@ def project_open(ctx, filepath):
         model = session_mgr.open_file(filepath)
         output_result(ctx, {"opened": filepath, "summary": model.validate()["summary"]})
     except Exception as e:
-        output_error(ctx, f"Failed to open project: {e}")
+        output_error(ctx, e)
 
 @project.command(name="save")
 @click.option("-o", "--output", "filepath", default=None, help="Destination .sh3d or .json path.")
@@ -444,7 +455,7 @@ def project_save(ctx, filepath):
         saved_path = session_mgr.save_file(filepath)
         output_result(ctx, {"saved": saved_path})
     except Exception as e:
-        output_error(ctx, f"Failed to save project: {e}")
+        output_error(ctx, e)
 
 @project.command(name="info")
 @click.pass_context
@@ -680,7 +691,7 @@ def wall_split(ctx, wall_id, split_offset_cm, new_wall_id):
     """Split a wall at offset into two contiguous segments (PAC-1 T06)."""
     try:
         if not math.isfinite(split_offset_cm):
-            raise ValueError(f"Split offset must be finite, got {split_offset_cm}")
+            raise ValidationRejectedError(f"Split offset must be finite, got {split_offset_cm}")
         with session_mgr.transaction():
             session_mgr.push_state()
             w1, w2 = session_mgr.model.split_wall(wall_id, split_offset_cm, new_wall_id=new_wall_id)
@@ -1083,7 +1094,7 @@ def export_svg_cmd(ctx, output, level_id):
         out_path = safe_publish_export(output, lambda tmp: export_svg(session_mgr.model, tmp, level_id=level_id))
         output_result(ctx, {"exported": out_path, "format": "svg", "level": level_id or "all"})
     except Exception as e:
-        output_error(ctx, f"Export SVG failed: {e}")
+        output_error(ctx, e)
 
 @export.command(name="dxf")
 @click.option("-o", "--output", required=True, help="Destination .dxf path.")
@@ -1095,7 +1106,7 @@ def export_dxf_cmd(ctx, output, level_id):
         out_path = safe_publish_export(output, lambda tmp: export_dxf(session_mgr.model, tmp, level_id=level_id))
         output_result(ctx, {"exported": out_path, "format": "dxf", "level": level_id or "all"})
     except Exception as e:
-        output_error(ctx, f"Export DXF failed: {e}")
+        output_error(ctx, e)
 
 @export.command(name="html")
 @click.option("-o", "--output", required=True, help="Destination .html path.")
@@ -1107,7 +1118,7 @@ def export_html_cmd(ctx, output, level_id):
         out_path = safe_publish_export(output, lambda tmp: export_html(session_mgr.model, tmp, level_id=level_id))
         output_result(ctx, {"exported": out_path, "format": "html", "level": level_id or "all"})
     except Exception as e:
-        output_error(ctx, f"Export HTML failed: {e}")
+        output_error(ctx, e)
 
 @export.command(name="sh3d")
 @click.option("-o", "--output", required=True, help="Destination .sh3d path.")
@@ -1118,7 +1129,7 @@ def export_sh3d_cmd(ctx, output):
         out_path = safe_publish_export(output, lambda tmp: session_mgr.model.save_sh3d(tmp))
         output_result(ctx, {"exported": out_path, "format": "sh3d"})
     except Exception as e:
-        output_error(ctx, f"Export SH3D failed: {e}")
+        output_error(ctx, e)
 
 @export.command(name="json")
 @click.option("-o", "--output", required=True, help="Destination .json path.")
@@ -1130,7 +1141,7 @@ def export_json_cmd(ctx, output, level_id):
         out_path = safe_publish_export(output, lambda tmp: export_json(session_mgr.model, tmp, level_id=level_id))
         output_result(ctx, {"exported": out_path, "format": "json", "level": level_id or "all"})
     except Exception as e:
-        output_error(ctx, f"Export JSON failed: {e}")
+        output_error(ctx, e)
 
 # ==============================================================================
 # 9. Session Commands

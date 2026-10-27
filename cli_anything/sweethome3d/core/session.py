@@ -7,6 +7,11 @@ import shutil
 from contextlib import contextmanager
 
 from cli_anything.sweethome3d.core.project import HomeModel
+from cli_anything.sweethome3d.core.exceptions import (
+    UnsupportedFeatureError,
+    ValidationRejectedError,
+    EntityConflictError,
+)
 
 SESSION_FILE = os.path.expanduser("~/.cli_anything_sweethome3d_session.json")
 
@@ -768,7 +773,7 @@ class SessionManager:
                 with open(filepath, "r", encoding="utf-8") as f:
                     candidate = HomeModel.from_dict(json.load(f))
             else:
-                raise ValueError("Unsupported project format. Must be .sh3d or .json.")
+                raise UnsupportedFeatureError("Unsupported project format. Must be .sh3d or .json.")
             
             self.model = candidate
             self.active_file = filepath

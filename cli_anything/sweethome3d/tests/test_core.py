@@ -30,7 +30,9 @@ from cli_anything.sweethome3d.core.dimension import DimensionLine
 from cli_anything.sweethome3d.core.project import HomeModel, _make_door_sector_poly
 from cli_anything.sweethome3d.core.session import SessionManager, _locked_save_json, _calc_sha256, ConcurrencyConflictError, RecoveryRequiredError
 from cli_anything.sweethome3d.core.export import export_html, export_svg, export_dxf, calculate_bounds
-from cli_anything.sweethome3d.core.native_contract import assert_native_wire
+from cli_anything.sweethome3d.core.exceptions import EntityConflictError, ValidationRejectedError, UnsupportedFeatureError
+from cli_anything.sweethome3d.core.native_contract import assert_native_wire, compute_curved_wall_error_budget
+from cli_anything.sweethome3d.core.topology import compute_wall_analytic_stations
 
 def test_wall_properties():
     # 6m wall horizontal
@@ -4186,3 +4188,126 @@ def test_r30_05_exception_identity_precedes_message_words(exc, expected):
 
 def test_r30_05_unknown_internal_valueerror_not_certified_as_domain_rejection():
     assert command.classify_error(ValueError("unexpected internal branch")) == (1, "ERROR")
+
+
+# ==============================================================================
+# Round 31 Whole-Root Repair Oracles
+# ==============================================================================
+
+@pytest.mark.parametrize('operation', ['reverse', 'split'])
+def test_r31_01_edit_rejects_nonfinite_host_station_before_any_write(operation):
+    m = HomeModel(); m.add_wall('w', 0, 0, 400, 0)
+    d = m.add_opening('d', 'Door', wall_id='w', offset_cm=float('nan'), width_cm=90)
+    w = m.walls['w']; before = repr(m.to_dict())
+    with pytest.raises(ValueError):
+        if operation == 'reverse': m.reverse_wall('w')
+        else: m.split_wall('w', 200, 'tail')
+    assert repr(m.to_dict()) == before
+    assert m.walls['w'] is w and m.openings['d'] is d
+
+
+def test_r31_01_split_rejects_existing_out_of_wall_opening_interval():
+    m = HomeModel(); m.add_wall('w', 0, 0, 400, 0)
+    m.add_opening('d', 'Door', wall_id='w', offset_cm=350, width_cm=90)
+    before = copy.deepcopy(m.to_dict())
+    with pytest.raises(ValueError): m.split_wall('w', 200, 'tail')
+    assert m.to_dict() == before
+
+
+def test_r31_01_reverse_rejects_nonfinite_slope_before_any_write():
+    m = HomeModel(); w = m.add_wall('w', 0, 0, 400, 0, extra_attribs={'heightAtEnd': 'nan'})
+    before = copy.deepcopy(m.to_dict())
+    with pytest.raises(ValueError): m.reverse_wall('w')
+    assert m.to_dict() == before and m.walls['w'] is w
+
+
+@pytest.mark.parametrize('sweep', [90, -90, 270, -270])
+def test_r31_02_coincident_overlap_reversal_and_scale_controls(sweep):
+    a = Wall('a', 0, 0, 4000, 0, arc_extent=sweep)
+    start, end = a.point_at_offset(0.1), a.point_at_offset(a.length * .8)
+    span = sweep * ((a.length*.8-.1)/a.length)
+    b = Wall('b', *end, *start, arc_extent=-span)
+    result = compute_wall_analytic_stations([a, b])
+    assert any(abs(r['station_cm']-.1) < .01 and 'b' in r['peer_ids'] for r in result['a'])
+    assert all('a' in r['peer_ids'] for r in result['b'])
+
+
+def test_r31_03_native_collapsed_quantized_chord_is_not_certified_valid():
+    w = Wall('w', 99999.9883, 99999.9883, 99999.9960, 99999.9960, thickness=.01, arc_extent=90)
+    f32 = lambda x: struct.unpack('!f', struct.pack('!f', x))[0]
+    assert w.chord_length > .01 and f32(w.x_start) == f32(w.x_end) and f32(w.y_start) == f32(w.y_end)
+    try:
+        result = compute_curved_wall_error_budget(w)
+    except ValueError:
+        return
+    assert result['valid'] is False, 'Zero native chord must not return valid=True / zero error'
+
+
+def test_r31_03_native_public_export_refuses_quantized_zero_chord():
+    m = HomeModel(); m.add_wall('w', 99999.9883, 99999.9883, 99999.9960, 99999.9960, thickness=.01, arc_extent=90)
+    with pytest.raises(ValueError): m.to_xml()
+
+
+def test_r31_04_archive_positive_resource_roundtrip(tmp_path):
+    m = HomeModel(); m.add_wall('w', 0, 0, 300, 0)
+    m.extra_zip_entries = {'assets/texture.bin': b'opaque-resource'}
+    target = tmp_path/'plan.sh3d'; m.save_sh3d(str(target))
+    loaded = HomeModel.load_sh3d(str(target))
+    assert loaded.extra_zip_entries['assets/texture.bin'] == b'opaque-resource'
+
+
+def test_r31_04_archive_exact_entry_limit_roundtrips_and_next_entry_is_rejected(tmp_path):
+    m = HomeModel(); m.add_wall('w', 0, 0, 300, 0)
+    m.extra_zip_entries = {f'assets/{i}': b'' for i in range(9999)}
+    target=tmp_path/'limit.sh3d'; m.save_sh3d(str(target)); before=target.read_bytes()
+    assert len(HomeModel.load_sh3d(str(target)).extra_zip_entries)==9999
+    m.extra_zip_entries['assets/one-too-many']=b''
+    with pytest.raises(ValueError, match='max entry limit'): m.save_sh3d(str(target))
+    assert target.read_bytes()==before
+
+
+def test_r31_04_archive_exact_total_includes_generated_xml_and_next_byte_is_rejected(tmp_path):
+    from cli_anything.sweethome3d.core.project import MAX_ZIP_UNCOMPRESSED_SIZE, MAX_ZIP_SINGLE_ENTRY_SIZE
+    m=HomeModel(); m.add_wall('w',0,0,300,0)
+    remaining=MAX_ZIP_UNCOMPRESSED_SIZE-len(m.to_xml().encode('utf-8'))
+    for i in range(5):
+        size=min(remaining,MAX_ZIP_SINGLE_ENTRY_SIZE)
+        m.extra_zip_entries[f'assets/{i}']=bytes(size); remaining-=size
+    assert remaining==0
+    target=tmp_path/'size.sh3d'; m.save_sh3d(str(target)); before=target.read_bytes()
+    assert HomeModel.load_sh3d(str(target)).walls['w'].length==300
+    m.extra_zip_entries['assets/4']+=bytes(1)
+    with pytest.raises(ValueError, match='total size limit'): m.save_sh3d(str(target))
+    assert target.read_bytes()==before
+
+
+@pytest.mark.parametrize('operation', ['open', 'save'])
+@pytest.mark.parametrize('exc, expected', [
+    (EntityConflictError('opaque owner failure'), (4, 'CONFLICT')),
+    (RecoveryRequiredError('opaque owner failure'), (7, 'RECOVERY_REQUIRED')),
+])
+def test_r31_05_project_handlers_preserve_typed_owner_exceptions(tmp_path, monkeypatch, operation, exc, expected):
+    state=tmp_path/'session.json'; mgr=SessionManager(str(state)); mgr.save_session()
+    src=tmp_path/'input.json'; src.write_text('{}', encoding='utf-8')
+    before=state.read_bytes()
+    def reject(*args, **kwargs): raise exc
+    monkeypatch.setattr(SessionManager, 'open_file' if operation=='open' else 'save_file', reject)
+    args=['--json','--session',str(state),'project',operation]
+    args += [str(src)] if operation=='open' else ['-o',str(tmp_path/'out.json')]
+    r=CliRunner().invoke(command.cli,args)
+    assert r.exit_code==expected[0],r.output
+    assert json.loads(r.stdout)['error']['code']==expected[1]
+    assert state.read_bytes()==before
+
+
+def test_r31_05_public_invalid_split_uses_validation_taxonomy_and_preserves_state(tmp_path):
+    state=tmp_path/'session.json'; mgr=SessionManager(str(state))
+    mgr.model.add_wall('w',0,0,400,0); mgr.save_session(); before=state.read_bytes()
+    r=CliRunner().invoke(command.cli,['--json','--session',str(state),'wall','split','w','--offset','500'])
+    assert r.exit_code==3,r.output
+    assert json.loads(r.stdout)['error']['code']=='VALIDATION_REJECTED'
+    assert state.read_bytes()==before
+
+
+def test_r31_05_unknown_valueerror_containing_user_conflict_word_stays_internal():
+    assert command.classify_error(ValueError('unexpected conflict-wall branch')) == (1,'ERROR')

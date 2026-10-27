@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.21.0 (PAC-1 Contract Iteration 30)  
+**Document Version:** 2.22.0 (PAC-1 Contract Iteration 31)  
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
 **Status:** In Active Execution  
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -423,4 +423,30 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
   - All 12 Round 30 repair oracles pass 100% green (`2026-10-27_SweetHome3D_CLI_Round30_Repair_Oracles.py`).
   - Merged all 12 oracles into `tests/test_core.py`, bringing repository test suite to **293 passed in 12.24s** (100% green).
   - All 4 built-in architectural templates validate clean.
+  - Clean Open Code Review via `ocr delegate` across 5 production files (0 blockers, 0 warnings, 0 regressions). (`✅ Completed`)
+
+
+### Phase 26: PAC-1 Round 31 Whole-Root Completion & Reciprocal Arc Topology (Iteration 31)
+- [x] **R28-P1-01 (Prepared Admission for reverse_wall and split_wall, Gates T06, A02)**:
+  - In `core/project.py`, introduced unified `_prepare_wall_edit` helper called prior to any state mutation by both `reverse_wall` and `split_wall`.
+  - Strictly validates source endpoints, thickness > 0, height > 0, finite sweep, positive wall length, finite sloped `heightAtEnd` > 0, and all hosted opening intervals ($0 \le o, w > 0, o + w \le L$) and resolvable physical poses with `ValidationRejectedError`.
+  - Rejects NaN, nonfinite, or out-of-interval opening and slope inputs upfront, leaving model objects, history, and serialized state 100% untouched. (`✅ Completed`)
+- [x] **R28-P1-02 (Reciprocal Coincident Arc Stations & Contained Endpoint Incidence, Gates T02, T03, T05)**:
+  - In `core/topology.py`, replaced asymmetric loop with unified `append_pair` emitting reciprocal `coincident_arc_overlap` events to both `source` and `peer` stations simultaneously.
+  - Ensures contained sub-arcs and reversed arcs receive peer incidence on all boundary stations across all signed sweep angles ($90^\circ, -90^\circ, 270^\circ, -270^\circ$). (`✅ Completed`)
+- [x] **R28-P1-03 (Degenerate Encoded Curve Rejection, Gate N03)**:
+  - In `core/native_contract.py`, `compute_curved_wall_error_budget` strictly raises `ValidationRejectedError` when source chord or quantized binary32 chord collapses ($c \le 10^{-6}	ext{ cm}$ or $c' \le 10^{-6}	ext{ cm}$), preventing false-positive zero-error success.
+  - Symmetrically enforced across `assert_native_model_domain`, `to_xml()`, and `from_xml()`. (`✅ Completed`)
+- [x] **R28-P1-04 (Archive Inventory Invariant Retained, Gate N08)**:
+  - Retained verified complete archive inventory limit checks ($\le 10,000$ members, $\le 100	ext{ MiB}$ aggregate size including `Home.xml`). (`✅ Completed`)
+- [x] **R28-P1-05 (Complete Typed Protocol Migration Across Handlers, Gate A04)**:
+  - In `sweethome3d_cli.py`, `classify_error` prioritizes exception type hierarchy (`RecoveryRequiredError` -> 7, `EntityConflictError` / `ConcurrencyConflictError` -> 4, `OSError` -> 6, `UnsupportedFeatureError` -> 5, `ValidationRejectedError` -> 3, unknown `ValueError` -> 1) without false-positive keyword pollution on user entities.
+  - Project `open` and `save` handlers pass raw exception instances directly to `output_error`, preserving typed exit codes and machine-readable error codes.
+  - In `session.py`, `open_file` raises `UnsupportedFeatureError` on invalid extensions.
+  - `wall split` raises `ValidationRejectedError` on invalid offsets. (`✅ Completed`)
+- [x] **Test Reconciliation & Oracle Integration**:
+  - All 19 Round 31 repair oracles pass 100% green (`2026-10-27_SweetHome3D_CLI_Round31_Repair_Oracles.py`).
+  - All 50 retained oracles (Round 28, 29, 30) pass 100% green.
+  - Merged all 19 Round 31 oracles into `tests/test_core.py`, bringing repository test suite to **312 passed in 12.15s** (100% green).
+  - All 4 built-in architectural templates validate clean (0 errors, 0 warnings).
   - Clean Open Code Review via `ocr delegate` across 5 production files (0 blockers, 0 warnings, 0 regressions). (`✅ Completed`)

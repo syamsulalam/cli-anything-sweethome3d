@@ -12,6 +12,8 @@ from pathlib import Path
 import re
 import struct
 
+from .exceptions import ValidationRejectedError
+
 HANDLER_SHA256 = "44110c53b45af40e62755d3b99a55a27f85d12f2b4334b8f79830feff79a5db0"
 PINNED_GRAMMAR_SHA256 = "2cd177039a941be968bcbe9035d14322107108c4d3b15ca521ed329b3a38b446"
 
@@ -235,7 +237,9 @@ def compute_curved_wall_error_budget(wall, steps=None) -> dict[str, float]:
     Total physical error = center error + radius error + (radius * native-angle error) + representation error.
     Enforces PAC-1 tolerance <= 0.01 cm.
     """
-    if not math.isfinite(wall.arc_extent) or abs(wall.arc_extent) < 1e-4:
+    if not math.isfinite(wall.arc_extent):
+        raise ValidationRejectedError("wall sweep must be finite")
+    if abs(wall.arc_extent) < 1e-4:
         return {
             "center_error": 0.0,
             "radius_error": 0.0,
@@ -245,15 +249,8 @@ def compute_curved_wall_error_budget(wall, steps=None) -> dict[str, float]:
             "valid": True,
         }
     c = wall.chord_length
-    if c < 1e-6:
-        return {
-            "center_error": 0.0,
-            "radius_error": 0.0,
-            "angle_error": 0.0,
-            "rep_error": 0.0,
-            "total_error": 0.0,
-            "valid": True,
-        }
+    if not math.isfinite(c) or c <= 1e-6:
+        raise ValidationRejectedError("curved wall has zero source chord")
     theta_rad = abs(math.radians(wall.arc_extent))
     alpha = theta_rad / 2.0
     sin_half = math.sin(alpha)
@@ -286,15 +283,8 @@ def compute_curved_wall_error_budget(wall, steps=None) -> dict[str, float]:
 
     # Reconstruct circle from float32 encoded endpoints and sweep (continuous path bound)
     cp = math.hypot(x2p - x1p, y2p - y1p)
-    if cp < 1e-6:
-        return {
-            "center_error": 0.0,
-            "radius_error": 0.0,
-            "angle_error": 0.0,
-            "rep_error": 0.0,
-            "total_error": 0.0,
-            "valid": True,
-        }
+    if not math.isfinite(cp) or cp <= 1e-6:
+        raise ValidationRejectedError("curved wall collapses in native float profile")
     sin_half_f32 = math.sin(f32_theta_rad / 2.0)
     R_prime = cp / (2.0 * sin_half_f32) if abs(sin_half_f32) > 1e-6 else cp
     h_prime = R_prime * math.cos(f32_theta_rad / 2.0)
