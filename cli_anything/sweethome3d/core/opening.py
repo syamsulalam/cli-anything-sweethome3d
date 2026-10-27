@@ -167,6 +167,7 @@ class Opening:
             "hinge": hinge,
             "latch": latch,
             "open_endpoint": open_endpoint,
+            "leaf_radius_cm": math.dist(hinge, latch),
         }
 
     def to_dict(self):

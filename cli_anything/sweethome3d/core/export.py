@@ -49,11 +49,11 @@ def calculate_bounds(model, margin_cm=100.0, level_id=None):
                 ys.extend([p1[1], p2[1]])
                 if op.opening_type == "door":
                     hinge = geom["hinge"]
-                    w = geom["width"]
+                    leaf_r = geom.get("leaf_radius_cm", math.dist(hinge, geom["latch"]))
                     if op.swing in ("left", "right"):
                         p_open = geom["open_endpoint"]
-                        xs.extend([p_open[0], hinge[0] - w, hinge[0] + w])
-                        ys.extend([p_open[1], hinge[1] - w, hinge[1] + w])
+                        xs.extend([p_open[0], hinge[0] - leaf_r, hinge[0] + leaf_r])
+                        ys.extend([p_open[1], hinge[1] - leaf_r, hinge[1] + leaf_r])
     for r in rooms:
         for p in r.points:
             xs.append(p[0])
@@ -244,19 +244,21 @@ def export_svg(model, filepath, level_id=None):
                         f'    <line stroke="#aaaaaa" stroke-dasharray="3,3" stroke-width="2" x1="{p1[0]:.1f}" y1="{p1[1]:.1f}" x2="{p2[0]:.1f}" y2="{p2[1]:.1f}"/>'
                     )
             elif op.swing == "left":
+                leaf_r = geom.get("leaf_radius_cm", math.dist(hinge, latch))
                 svg_lines.append(
-                    f'    <line class="door" x1="{hinge[0]:.1f}" y1="{hinge[1]:.1f}" x2="{p_open[0]:.1f}" y2="{p_open[1]:.1f}"/>'
+                    f'    <line class="door" x1="{hinge[0]:.6f}" y1="{hinge[1]:.6f}" x2="{p_open[0]:.6f}" y2="{p_open[1]:.6f}"/>'
                 )
                 svg_lines.append(
-                    f'    <path class="door-arc" d="M {latch[0]:.1f} {latch[1]:.1f} A {w:.1f} {w:.1f} 0 0 0 {p_open[0]:.1f} {p_open[1]:.1f}"/>'
+                    f'    <path class="door-arc" d="M {latch[0]:.6f} {latch[1]:.6f} A {leaf_r:.6f} {leaf_r:.6f} 0 0 0 {p_open[0]:.6f} {p_open[1]:.6f}"/>'
                 )
             else:
                 # Default right swing
+                leaf_r = geom.get("leaf_radius_cm", math.dist(hinge, latch))
                 svg_lines.append(
-                    f'    <line class="door" x1="{hinge[0]:.1f}" y1="{hinge[1]:.1f}" x2="{p_open[0]:.1f}" y2="{p_open[1]:.1f}"/>'
+                    f'    <line class="door" x1="{hinge[0]:.6f}" y1="{hinge[1]:.6f}" x2="{p_open[0]:.6f}" y2="{p_open[1]:.6f}"/>'
                 )
                 svg_lines.append(
-                    f'    <path class="door-arc" d="M {latch[0]:.1f} {latch[1]:.1f} A {w:.1f} {w:.1f} 0 0 1 {p_open[0]:.1f} {p_open[1]:.1f}"/>'
+                    f'    <path class="door-arc" d="M {latch[0]:.6f} {latch[1]:.6f} A {leaf_r:.6f} {leaf_r:.6f} 0 0 1 {p_open[0]:.6f} {p_open[1]:.6f}"/>'
                 )
         else:
             # Window glass line

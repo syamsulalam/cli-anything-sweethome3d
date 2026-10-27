@@ -4,6 +4,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
 
 /**
@@ -32,7 +34,7 @@ public class SweetHomeConsumer {
             if ("snapshot".equalsIgnoreCase(command)) {
                 String inPath = args[1];
                 String outJson = args[2];
-                Home home = readHomeSafe(recorder, inPath);
+                Home home = readQualified(recorder, inPath);
                 String json = generateSnapshotJson(home, inPath);
                 try (PrintWriter pw = new PrintWriter(new OutputStreamWriter(new FileOutputStream(outJson), "UTF-8"))) {
                     pw.print(json);
@@ -41,19 +43,31 @@ public class SweetHomeConsumer {
             } else if ("roundtrip".equalsIgnoreCase(command)) {
                 String inPath = args[1];
                 String outPath = args[2];
-                Home home = readHomeSafe(recorder, inPath);
-                recorder.writeHome(home, outPath);
+                Home home = readQualified(recorder, inPath);
+                File tmpOut = File.createTempFile("sh3d-roundtrip-stage-", ".sh3d");
+                try {
+                    recorder.writeHome(home, tmpOut.getAbsolutePath());
+                    Files.move(tmpOut.toPath(), new File(outPath).toPath(), StandardCopyOption.REPLACE_EXISTING);
+                } finally {
+                    Files.deleteIfExists(tmpOut.toPath());
+                }
                 System.out.println("ROUNDTRIP_OK");
             } else if ("verify".equalsIgnoreCase(command)) {
                 String inPath = args[1];
                 String outPath = args[2];
                 String outJson = args[3];
-                Home home1 = readHomeSafe(recorder, inPath);
-                recorder.writeHome(home1, outPath);
-                Home home2 = readHomeSafe(recorder, outPath);
-                String json = generateSnapshotJson(home2, outPath);
-                try (PrintWriter pw = new PrintWriter(new OutputStreamWriter(new FileOutputStream(outJson), "UTF-8"))) {
-                    pw.print(json);
+                Home home1 = readQualified(recorder, inPath);
+                File tmpOut = File.createTempFile("sh3d-verify-stage-", ".sh3d");
+                try {
+                    recorder.writeHome(home1, tmpOut.getAbsolutePath());
+                    Home home2 = readQualified(recorder, tmpOut.getAbsolutePath());
+                    String json = generateSnapshotJson(home2, outPath);
+                    try (PrintWriter pw = new PrintWriter(new OutputStreamWriter(new FileOutputStream(outJson), "UTF-8"))) {
+                        pw.print(json);
+                    }
+                    Files.move(tmpOut.toPath(), new File(outPath).toPath(), StandardCopyOption.REPLACE_EXISTING);
+                } finally {
+                    Files.deleteIfExists(tmpOut.toPath());
                 }
                 System.out.println("VERIFY_OK");
             } else {
@@ -66,12 +80,14 @@ public class SweetHomeConsumer {
         }
     }
 
-    private static Home readHomeSafe(HomeFileRecorder recorder, String path) throws Exception {
+    private static Home readQualified(HomeFileRecorder recorder, String path) throws Exception {
+        Home home = recorder.readHome(path);
+        File audit = File.createTempFile("sh3d-consumer-resource-audit-", ".sh3d");
         try {
-            return recorder.readHome(path);
-        } catch (DamagedHomeRecorderException de) {
-            // When external 3D OBJ / texture files are not bundled in archive, geometry is retained
-            return de.getDamagedHome();
+            recorder.writeHome(home, audit.getAbsolutePath());
+            return home;
+        } finally {
+            Files.deleteIfExists(audit.toPath());
         }
     }
 

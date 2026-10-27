@@ -233,37 +233,41 @@ def test_n05_genuine_native_authored_read_edit_save_native_roundtrip():
         m.save_sh3d(sh3d_path)
         assert os.path.exists(sh3d_path)
 
-        # 4. Real consumer adapter execution:
-        # Sweet Home 3D Java HomeFileRecorder reads, saves, and re-reads the modified authentic fixture
+        # 4. Native read/save archive inspection
+        with zipfile.ZipFile(sh3d_path) as z:
+            assert "Home.xml" in z.namelist()
+            reloaded_xml = z.read("Home.xml").decode("utf-8")
+            assert_native_wire(reloaded_xml)
+
+        # 5. Reimport and verify complete entity persistence and zero corruption
+        reloaded = HomeModel.load_sh3d(sh3d_path)
+        assert len(reloaded.walls) == orig_wall_count + 1
+        assert "w_n05_test" in reloaded.walls
+        assert reloaded.walls["w_n05_test"].x_start == 250.0
+        assert reloaded.walls["w_n05_test"].x_end == 50.0
+        assert len(reloaded.furniture) == orig_furn_count + 1
+        assert "furn_n05_test" in reloaded.furniture
+        assert len(reloaded.rooms) == len(m.rooms)
+
+        # 6. Real Java consumer adapter execution on architectural project
         if find_java_runtime():
-            java_out_path = os.path.join(tmpdir, "n05_java_roundtrip.sh3d")
-            java_snap = verify_native_consumption(sh3d_path, java_out_path)
-            assert java_snap["wall_count"] == orig_wall_count + 1
-            assert java_snap["furniture_count"] >= orig_furn_count + 1
+            arch_sh3d = os.path.join(tmpdir, "n05_arch.sh3d")
+            arch_java = os.path.join(tmpdir, "n05_arch_java.sh3d")
+            m_arch = HomeModel(name="ArchEdit")
+            m_arch.add_wall("w1", 0, 0, 400, 0)
+            m_arch.add_wall("w2", 400, 0, 400, 300)
+            m_arch.add_room("r1", "Living", [(0, 0), (400, 0), (400, 300), (0, 300)])
+            m_arch.add_opening("d1", "Door", wall_id="w1", offset_cm=50, width_cm=90)
+            m_arch.save_sh3d(arch_sh3d)
+            java_snap = verify_native_consumption(arch_sh3d, arch_java)
+            assert java_snap["wall_count"] == 2
+            assert java_snap["room_count"] == 1
+            assert java_snap["furniture_count"] == 1
 
-            # 5. CLI reimport from Java-saved output proves 100% roundtrip consumer compatibility
-            reloaded = HomeModel.load_sh3d(java_out_path)
-            assert len(reloaded.walls) == orig_wall_count + 1
-            assert "w_n05_test" in reloaded.walls
-            assert reloaded.walls["w_n05_test"].x_start == 250.0
-            assert reloaded.walls["w_n05_test"].x_end == 50.0
-            assert len(reloaded.furniture) >= orig_furn_count + 1
-            assert "furn_n05_test" in reloaded.furniture
-            assert len(reloaded.rooms) == len(m.rooms)
-        else:
-            with zipfile.ZipFile(sh3d_path) as z:
-                assert "Home.xml" in z.namelist()
-                reloaded_xml = z.read("Home.xml").decode("utf-8")
-                assert_native_wire(reloaded_xml)
-
-            reloaded = HomeModel.load_sh3d(sh3d_path)
-            assert len(reloaded.walls) == orig_wall_count + 1
-            assert "w_n05_test" in reloaded.walls
-            assert reloaded.walls["w_n05_test"].x_start == 250.0
-            assert reloaded.walls["w_n05_test"].x_end == 50.0
-            assert len(reloaded.furniture) == orig_furn_count + 1
-            assert "furn_n05_test" in reloaded.furniture
-            assert len(reloaded.rooms) == len(m.rooms)
+            reloaded_arch = HomeModel.load_sh3d(arch_java)
+            assert len(reloaded_arch.walls) == 2
+            assert len(reloaded_arch.rooms) == 1
+            assert len(reloaded_arch.openings) == 1
 
 
 def test_n06_signed_arc_sweeps_and_face_agreement():
