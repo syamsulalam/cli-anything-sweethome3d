@@ -474,7 +474,7 @@ class HomeModel:
                   extra_attribs=None, extra_children=None):
         level_id = str(level_id)
         if self.get_level(level_id):
-            raise ValidationRejectedError(f"Level '{level_id}' already exists.")
+            raise EntityConflictError(f"Level '{level_id}' already exists.")
         lvl = Level(level_id, name, elevation_cm, height_cm, floor_thickness_cm, extra_attribs, extra_children)
         self.levels.append(lvl)
         return lvl

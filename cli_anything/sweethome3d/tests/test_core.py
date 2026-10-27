@@ -4433,3 +4433,41 @@ def test_public_typed_unsupported_project_extension_control(tmp_path):
     assert r.exit_code==5,r.output
     assert json.loads(r.stdout)['error']['code']=='UNSUPPORTED'
     assert state.read_bytes()==before
+
+
+# ==============================================================================
+# PAC-1 Round 33 Root Closure and Conflict Taxonomy Oracles (R28-P1-05 Level)
+# ==============================================================================
+
+@pytest.mark.parametrize('kind',['wall','room','opening','furniture','dimension','level'])
+def test_duplicate_entity_owners_share_conflict_taxonomy(kind):
+    m=HomeModel(); m.add_wall('host',0,0,400,0)
+    create={
+        'wall':lambda:m.add_wall('dup',0,100,400,100),
+        'room':lambda:m.add_room('dup','Room',[(0,0),(400,0),(400,300),(0,300)]),
+        'opening':lambda:m.add_opening('dup','Door',wall_id='host'),
+        'furniture':lambda:m.add_furniture('dup','Furniture'),
+        'dimension':lambda:m.add_dimension('dup',0,0,100,0),
+        'level':lambda:m.add_level('dup','Upper',elevation_cm=300),
+    }[kind]
+    create(); before=copy.deepcopy(m.to_dict())
+    with pytest.raises(EntityConflictError): create()
+    assert m.to_dict()==before
+
+
+@pytest.mark.parametrize('level_id',['upper','unsupported-level'])
+def test_public_duplicate_level_conflict_survives_restart_without_state_change(tmp_path,level_id):
+    state=tmp_path/'session.json'
+    args=['--json','--session',str(state),'level','add','--id',level_id,'--name','Upper','--elevation','300']
+    positive=CliRunner().invoke(command.cli,args)
+    assert positive.exit_code==0,positive.output
+    assert json.loads(positive.stdout)['status']=='success'
+    loaded=SessionManager(str(state))
+    assert loaded.model.get_level(level_id).elevation_cm==300
+    before=state.read_bytes(); snapshot=copy.deepcopy(loaded.model.to_dict())
+    negative=CliRunner().invoke(command.cli,args)
+    assert state.read_bytes()==before
+    restarted=SessionManager(str(state))
+    assert restarted.model.to_dict()==snapshot
+    assert negative.exit_code==4,negative.output
+    assert json.loads(negative.stdout)['error']['code']=='CONFLICT'

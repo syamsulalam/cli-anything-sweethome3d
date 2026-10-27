@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.23.0 (PAC-1 Contract Iteration 32)
+**Document Version:** 2.24.0 (PAC-1 Contract Iteration 33)
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)
 **Status:** In Active Execution
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -472,5 +472,18 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
   - All 28 Round 32 repair oracles pass 100% green (`2026-10-27_SweetHome3D_CLI_Round32_Repair_Oracles.py`).
   - All 69 retained oracles (Round 28-31) pass 100% green.
   - Merged all 28 Round 32 oracles into `tests/test_core.py`, expanding full repository test suite to **340 passed in 14.36s** (100% green).
+  - All 4 built-in architectural templates validate clean (0 errors, 0 warnings).
+  - Clean Open Code Review via `ocr delegate` across modified production files (0 blockers, 0 warnings, 0 regressions). (`✅ Completed`)
+
+
+### Phase 28: PAC-1 Round 33 Complete Historical Root Closure (Iteration 33)
+- [x] **R28-P1-05 Complete Root Closure (Duplicate Level EntityConflictError, Gate A04)**:
+  - In `core/project.py:477`, `HomeModel.add_level` raises `EntityConflictError` on duplicate level ID, matching `add_wall`, `add_room`, `add_opening`, `add_furniture`, and `add_dimension`.
+  - CLI `level add` with duplicate ID deterministically exits with 4 / `CONFLICT`, while preserving persisted session bytes and restart models byte-for-byte.
+  - All 5 historical P1 roots (`R28-P1-01`, `R28-P1-02`, `R28-P1-03`, `R28-P1-04`, `R28-P1-05`) are now 100% CLOSED. (`✅ Completed`)
+- [x] **Test Reconciliation & Oracle Integration**:
+  - All 8 Round 33 repair oracles pass 100% green (`2026-10-27_SweetHome3D_CLI_Round33_Repair_Oracles.py`).
+  - All 97 retained oracles (Round 28-32) pass 100% green.
+  - Merged all 8 Round 33 oracles into `tests/test_core.py`, expanding full repository test suite to **348 passed in 37.79s** (100% green).
   - All 4 built-in architectural templates validate clean (0 errors, 0 warnings).
   - Clean Open Code Review via `ocr delegate` across modified production files (0 blockers, 0 warnings, 0 regressions). (`✅ Completed`)
