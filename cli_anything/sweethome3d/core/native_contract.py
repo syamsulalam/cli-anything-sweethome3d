@@ -132,8 +132,8 @@ def validate_native_xml(xml_text, *, dtd_path, dtd_sha256, dialect="native-v7400
             raise ValueError("Native grammar validation error: " + str(dtd.error_log))
     except (etree.XMLSyntaxError, etree.DTDParseError, etree.DocumentInvalid) as exc:
         raise ValidationRejectedError("NATIVE_STRUCTURE_INVALID: " + str(exc)) from exc
-    if root.tag != "home" or root.get("version") != "7400":
-        raise ValidationRejectedError("Expected native home version 7400")
+    if root.tag != "home" or root.get("version") not in {"5500", "6000", "6400", "7400", "7500"}:
+        raise ValidationRejectedError("Expected native home version 7400 (or supported genuine versions 5500-7500)")
     by_id = {}
     for elem in root.iter():
         entity_id = elem.get("id")
@@ -163,8 +163,10 @@ def validate_native_xml(xml_text, *, dtd_path, dtd_sha256, dialect="native-v7400
             if elem.get(attr) is not None and finite_number(elem.get(attr)) <= 0:
                 raise ValidationRejectedError("Nonpositive physical size: " + attr)
         for attr in ("color", "floorColor", "ceilingColor", "leftSideColor", "rightSideColor"):
-            if elem.get(attr) is not None:
-                native_to_rgb(elem.get(attr))
+            c_val = elem.get(attr)
+            if c_val is not None:
+                if not isinstance(c_val, str) or not re.fullmatch(r"[0-9A-Fa-f]{8}", c_val):
+                    raise ValidationRejectedError(f"Invalid native color format {c_val} on {elem.tag}.{attr}")
     return {"valid": True, "profile": "native-v7400", "coverage": "structure-and-core-values",
             "grammar_sha256": dtd_sha256, "target_execution": "not_checked"}
 

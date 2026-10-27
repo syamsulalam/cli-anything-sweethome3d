@@ -2480,6 +2480,7 @@ class HomeModel:
             )
 
         # Rooms
+        room_seq = 1
         for elem in root.findall("room"):
             known_room_keys = {"id", "level", "name", "area", "floorColor"}
             extra_attribs = {k: v for k, v in elem.attrib.items() if k not in known_room_keys}
@@ -2489,8 +2490,14 @@ class HomeModel:
                 points.append((float(p.attrib.get("x", 0.0)), float(p.attrib.get("y", 0.0))))
             raw_col = elem.attrib.get("floorColor", "#EAEAEA")
             parsed_col = _parse_native_color(raw_col)
+            r_id = elem.attrib.get("id")
+            if not r_id:
+                while f"room_{room_seq}" in model.rooms:
+                    room_seq += 1
+                r_id = f"room_{room_seq}"
+                room_seq += 1
             model.add_room(
-                room_id=elem.attrib.get("id"),
+                room_id=r_id,
                 name=elem.attrib.get("name", "Room"),
                 points=points,
                 level_id=elem.attrib.get("level", "level1"),
@@ -2500,6 +2507,7 @@ class HomeModel:
             )
 
         # Openings
+        op_seq = 1
         for elem in root.findall("doorOrWindow"):
             known_op_keys = {"id", "name", "wall", "offset", "width", "height", "type", "swing", "x", "y", "depth", "angle", "level", "elevation"}
             extra_attribs = {k: v for k, v in elem.attrib.items() if k not in known_op_keys}
@@ -2511,6 +2519,11 @@ class HomeModel:
             ]
 
             op_id = elem.attrib.get("id")
+            if not op_id:
+                while f"op_{op_seq}" in model.openings:
+                    op_seq += 1
+                op_id = f"op_{op_seq}"
+                op_seq += 1
             name = elem.attrib.get("name", "Door/Window")
             wall_id = elem.attrib.get("wall")
             width_cm = float(elem.attrib.get("width", 90.0))
@@ -2539,25 +2552,33 @@ class HomeModel:
                     def _angle_diff(a, b):
                         return (a - b + math.pi) % (2 * math.pi) - math.pi
 
-                    # Right preset: (xp=0.0, yp=0.5, wp=1.0, ap0=0.0, ap1=-pi/2)
-                    err_h_r = math.hypot(width_cm * (x_axis - 0.0), depth_val * (y_axis - 0.5))
-                    err_w_r = width_cm * abs(width_ratio - 1.0)
-                    rmax_r = width_cm * max(abs(width_ratio), 1.0)
-                    err_a_r = max(
-                        2 * rmax_r * abs(math.sin(_angle_diff(start_angle, 0.0) / 2)),
-                        2 * rmax_r * abs(math.sin(_angle_diff(end_angle, -math.pi / 2) / 2))
-                    )
-                    tot_err_r = err_h_r + err_w_r + err_a_r
+                    # Presets: ideal zero-frame and official eTeks standard/open doors
+                    presets_r = [
+                        (0.0, 0.5, 1.0, 0.0, -math.pi / 2),
+                        (0.05464481, 0.5862069, 0.89071035, 0.0, -math.pi / 2),
+                        (0.05464481, 0.125, 0.89071035, 0.0, -math.pi / 2),
+                    ]
+                    presets_l = [
+                        (1.0, 0.5, 1.0, math.pi, 3 * math.pi / 2),
+                        (1.0 - 0.05464481, 0.5862069, 0.89071035, math.pi, 3 * math.pi / 2),
+                        (1.0 - 0.05464481, 0.125, 0.89071035, math.pi, 3 * math.pi / 2),
+                    ]
 
-                    # Left preset: (xp=1.0, yp=0.5, wp=1.0, ap0=pi, ap1=3*pi/2 or -pi/2)
-                    err_h_l = math.hypot(width_cm * (x_axis - 1.0), depth_val * (y_axis - 0.5))
-                    err_w_l = width_cm * abs(width_ratio - 1.0)
-                    rmax_l = width_cm * max(abs(width_ratio), 1.0)
-                    err_a_l = max(
-                        2 * rmax_l * abs(math.sin(_angle_diff(start_angle, math.pi) / 2)),
-                        2 * rmax_l * abs(math.sin(_angle_diff(end_angle, 3 * math.pi / 2) / 2))
-                    )
-                    tot_err_l = err_h_l + err_w_l + err_a_l
+                    def _min_err(presets):
+                        best = 999999.0
+                        for xp, yp, wp, ap0, ap1 in presets:
+                            err_h = math.hypot(width_cm * (x_axis - xp), depth_val * (y_axis - yp))
+                            err_w = width_cm * abs(width_ratio - wp)
+                            rmax = width_cm * max(abs(width_ratio), 1.0)
+                            err_a = max(
+                                2 * rmax * abs(math.sin(_angle_diff(start_angle, ap0) / 2)),
+                                2 * rmax * abs(math.sin(_angle_diff(end_angle, ap1) / 2))
+                            )
+                            best = min(best, err_h + err_w + err_a)
+                        return best
+
+                    tot_err_r = _min_err(presets_r)
+                    tot_err_l = _min_err(presets_l)
 
                     if tot_err_r <= 0.01:
                         native_swing = "right"
@@ -2646,6 +2667,7 @@ class HomeModel:
             )
 
         # Furniture
+        furn_seq = 1
         for elem in root.findall("pieceOfFurniture"):
             known_f_keys = {"id", "name", "catalogId", "x", "y", "elevation", "width", "depth", "height", "angle", "level"}
             extra_attribs = {k: v for k, v in elem.attrib.items() if k not in known_f_keys}
@@ -2653,8 +2675,15 @@ class HomeModel:
 
             angle_deg = decode_angle(elem.attrib.get("angle", "0"), dialect=dialect) % 360.0
 
+            f_id = elem.attrib.get("id")
+            if not f_id:
+                while f"furn_{furn_seq}" in model.furniture:
+                    furn_seq += 1
+                f_id = f"furn_{furn_seq}"
+                furn_seq += 1
+
             model.add_furniture(
-                furniture_id=elem.attrib.get("id"),
+                furniture_id=f_id,
                 name=elem.attrib.get("name"),
                 catalog_id=elem.attrib.get("catalogId", "custom"),
                 x_cm=float(elem.attrib.get("x", 0.0)),
@@ -2670,14 +2699,23 @@ class HomeModel:
             )
 
         # Dimensions (PAC-1 N02, R17-P1-03, R18-P1-02: support elevationStart / elevationEnd)
+        dim_seq = 1
         for elem in root.findall("dimensionLine"):
             known_dim_keys = {"id", "level", "xStart", "yStart", "xEnd", "yEnd", "offset", "elevation", "elevationStart", "elevationEnd"}
             extra_attribs = {k: v for k, v in elem.attrib.items() if k not in known_dim_keys}
             extra_children = [ET.tostring(c, encoding="unicode") for c in elem]
             e_start = float(elem.attrib.get("elevationStart", elem.attrib.get("elevation", 0.0)))
             e_end = float(elem.attrib.get("elevationEnd", e_start))
+
+            d_id = elem.attrib.get("id")
+            if not d_id:
+                while f"dim_{dim_seq}" in model.dimensions:
+                    dim_seq += 1
+                d_id = f"dim_{dim_seq}"
+                dim_seq += 1
+
             model.add_dimension(
-                dimension_id=elem.attrib.get("id"),
+                dimension_id=d_id,
                 x_start=float(elem.attrib.get("xStart", 0.0)),
                 y_start=float(elem.attrib.get("yStart", 0.0)),
                 x_end=float(elem.attrib.get("xEnd", 0.0)),
