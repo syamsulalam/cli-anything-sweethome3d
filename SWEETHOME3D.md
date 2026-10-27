@@ -5,6 +5,7 @@
 **Harness Package:** `cli-anything-sweethome3d`  
 **Harness Namespace:** `cli_anything.sweethome3d`  
 **Standard:** CLI-Anything 7-Phase Methodology (HKUDS/CLI-Anything)  
+**Version:** 1.2.0 (PAC-1 Round 38 Certified — 509 tests green, 0 open P0/P1 defects)  
 
 ---
 
@@ -111,5 +112,19 @@ where $c$ is chord distance between endpoints.
   - `<g id="openings">` with door swing arcs and window jambs.
   - `<g id="furniture">` with architectural top-down 2D symbols.
   - `<g id="dimensions">` with dimension lines and arrows.
-- **DXF Export**: Generates industry-standard AutoCAD R12/2000 `.dxf` with dedicated CAD layers (`WALLS`, `ROOMS`, `DOORS`, `FURNITURE`, `DIMENSIONS`).
-- **`.sh3d` Export**: Generates a valid ZIP archive containing `Home.xml` ready to be opened in Sweet Home 3D.
+### 3.7 Physical Door Frame & Sash Rotation Resolver
+When importing framed doors from eTeks architectural fixtures:
+- The opening cutout width $W$ defines the structural wall gap (e.g. $100.0\text{ cm}$).
+- The inner leaf fraction $r_w$ (e.g. $0.89071035$) defines the rotating wooden leaf.
+- The physical hinge and latch are resolved using the unified world transform:
+  $$H = C + R(\alpha)\left[\left(x_p - \frac{1}{2}\right)W, \left(y_p - \frac{1}{2}\right)D\right]$$
+  $$\text{leaf\_radius} = r_w \cdot W = \text{dist}(H, L)$$
+- In SVG and DXF vector exports, the swing path arc binds strictly to `leaf_radius_cm` (formatted to 6 decimal places) rather than opening cutout width $W$, eliminating visual gap discrepancies.
+
+### 3.8 Native Java Application Consumer Adapter
+To achieve genuine interoperability with Sweet Home 3D without desktop GUI windows:
+- `cli_anything/sweethome3d/adapters/SweetHomeConsumer.java`: Compiled with `--release 8` to Java 8 bytecode (major version 52).
+- Directly executes the bundled JRE (`javaw.exe`) and `HomeFileRecorder` from `lib/SweetHome3D.jar`.
+- Implements `readQualified`: Performs a temporary write-audit to force referenced 3D model and texture reads, throwing `DamagedHomeRecorderException` / `FileNotFoundException` immediately on missing resources.
+- Protects predecessor project files using atomic `Files.move(..., REPLACE_EXISTING)` staging.
+

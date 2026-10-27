@@ -31,7 +31,7 @@ setup(
         "lxml>=6.0.0",
     ],
     package_data={
-        "cli_anything.sweethome3d": ["resources/*.dtd"],
+        "cli_anything.sweethome3d": ["resources/*.dtd", "adapters/*.class", "adapters/*.java"],
     },
     entry_points={
         "console_scripts": [
