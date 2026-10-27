@@ -93,14 +93,66 @@ class Opening:
         else:
             return None
 
-        if self.swing == "left":
-            hinge = p2
-            latch = p1
-            open_endpoint = (p2[0] + w * nx, p2[1] + w * ny)
+        # PAC-1 N07/E02, R36-P1-01: Shared physical leaf resolver
+        native_sash = None
+        if "_native_sash" in self.extra_attribs:
+            try:
+                import json
+                sash_info = json.loads(self.extra_attribs["_native_sash"])
+                if sash_info.get("swing") == self.swing:
+                    native_sash = sash_info.get("attribs", {})
+            except Exception:
+                pass
+
+        if (
+            native_sash
+            and "xAxis" in native_sash
+            and "yAxis" in native_sash
+            and "width" in native_sash
+            and "startAngle" in native_sash
+            and "endAngle" in native_sash
+        ):
+            xp = float(native_sash["xAxis"])
+            yp = float(native_sash["yAxis"])
+            rw = float(native_sash["width"])
+            b0 = float(native_sash["startAngle"])
+            b1 = float(native_sash["endAngle"])
+
+            depth = (
+                float(self.depth_cm)
+                if self.depth_cm is not None
+                else (float(wall.thickness) if wall is not None else 15.0)
+            )
+            hx = (xp - 0.5) * w
+            hy = (yp - 0.5) * depth
+            leaf_r = rw * w
+
+            rad = math.radians(eff_angle)
+            cos_a = math.cos(rad)
+            sin_a = math.sin(rad)
+
+            def world_local(lx, ly):
+                return (
+                    center_x + cos_a * lx - sin_a * ly,
+                    center_y + sin_a * lx + cos_a * ly,
+                )
+
+            hinge = world_local(hx, hy)
+            latch = world_local(
+                hx + leaf_r * math.cos(b0), hy - leaf_r * math.sin(b0)
+            )
+            open_endpoint = world_local(
+                hx + leaf_r * math.cos(b1), hy - leaf_r * math.sin(b1)
+            )
         else:
-            hinge = p1
-            latch = p2
-            open_endpoint = (p1[0] + w * nx, p1[1] + w * ny)
+            if self.swing == "left":
+                hinge = p2
+                latch = p1
+                open_endpoint = (p2[0] + w * nx, p2[1] + w * ny)
+            else:
+                hinge = p1
+                latch = p2
+                open_endpoint = (p1[0] + w * nx, p1[1] + w * ny)
 
         return {
             "p1": p1,

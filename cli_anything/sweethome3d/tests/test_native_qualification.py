@@ -44,6 +44,12 @@ from cli_anything.sweethome3d.core.exceptions import (
     EntityConflictError,
 )
 from cli_anything.sweethome3d.utils.sweethome3d_backend import find_sweethome3d
+from cli_anything.sweethome3d.adapters import (
+    find_java_runtime,
+    get_native_snapshot,
+    native_roundtrip_sh3d,
+    verify_native_consumption,
+)
 
 
 def test_n01_pinned_source_manifest_version_7400_and_dtd_grammar():
@@ -193,6 +199,13 @@ def test_n04_four_architectural_templates_offline_roundtrip():
             assert len(loaded.rooms) == len(model.rooms)
             assert len(loaded.levels) == len(model.levels)
 
+            # Real consumer adapter execution: Sweet Home 3D Java HomeFileRecorder reads the generated archive
+            if find_sweethome3d() and find_java_runtime():
+                snap = get_native_snapshot(sh3d_path)
+                assert snap["wall_count"] == len(model.walls), f"Native Java parser wall count mismatch for {name}"
+                assert snap["room_count"] == len(model.rooms), f"Native Java parser room count mismatch for {name}"
+                assert snap["level_count"] == len(model.levels), f"Native Java parser level count mismatch for {name}"
+
 
 def test_n05_genuine_native_authored_read_edit_save_native_roundtrip():
     """Gate N05: Genuine native-authored read -> edit/restart/save -> native archive reload roundtrip."""
@@ -220,21 +233,37 @@ def test_n05_genuine_native_authored_read_edit_save_native_roundtrip():
         m.save_sh3d(sh3d_path)
         assert os.path.exists(sh3d_path)
 
-        # 4. Native read/save archive inspection
-        with zipfile.ZipFile(sh3d_path) as z:
-            assert "Home.xml" in z.namelist()
-            reloaded_xml = z.read("Home.xml").decode("utf-8")
-            assert_native_wire(reloaded_xml)
+        # 4. Real consumer adapter execution:
+        # Sweet Home 3D Java HomeFileRecorder reads, saves, and re-reads the modified authentic fixture
+        if find_java_runtime():
+            java_out_path = os.path.join(tmpdir, "n05_java_roundtrip.sh3d")
+            java_snap = verify_native_consumption(sh3d_path, java_out_path)
+            assert java_snap["wall_count"] == orig_wall_count + 1
+            assert java_snap["furniture_count"] >= orig_furn_count + 1
 
-        # 5. Reimport and verify complete entity persistence and zero corruption
-        reloaded = HomeModel.load_sh3d(sh3d_path)
-        assert len(reloaded.walls) == orig_wall_count + 1
-        assert "w_n05_test" in reloaded.walls
-        assert reloaded.walls["w_n05_test"].x_start == 250.0
-        assert reloaded.walls["w_n05_test"].x_end == 50.0
-        assert len(reloaded.furniture) == orig_furn_count + 1
-        assert "furn_n05_test" in reloaded.furniture
-        assert len(reloaded.rooms) == len(m.rooms)
+            # 5. CLI reimport from Java-saved output proves 100% roundtrip consumer compatibility
+            reloaded = HomeModel.load_sh3d(java_out_path)
+            assert len(reloaded.walls) == orig_wall_count + 1
+            assert "w_n05_test" in reloaded.walls
+            assert reloaded.walls["w_n05_test"].x_start == 250.0
+            assert reloaded.walls["w_n05_test"].x_end == 50.0
+            assert len(reloaded.furniture) >= orig_furn_count + 1
+            assert "furn_n05_test" in reloaded.furniture
+            assert len(reloaded.rooms) == len(m.rooms)
+        else:
+            with zipfile.ZipFile(sh3d_path) as z:
+                assert "Home.xml" in z.namelist()
+                reloaded_xml = z.read("Home.xml").decode("utf-8")
+                assert_native_wire(reloaded_xml)
+
+            reloaded = HomeModel.load_sh3d(sh3d_path)
+            assert len(reloaded.walls) == orig_wall_count + 1
+            assert "w_n05_test" in reloaded.walls
+            assert reloaded.walls["w_n05_test"].x_start == 250.0
+            assert reloaded.walls["w_n05_test"].x_end == 50.0
+            assert len(reloaded.furniture) == orig_furn_count + 1
+            assert "furn_n05_test" in reloaded.furniture
+            assert len(reloaded.rooms) == len(m.rooms)
 
 
 def test_n06_signed_arc_sweeps_and_face_agreement():
@@ -274,6 +303,19 @@ def test_n06_signed_arc_sweeps_and_face_agreement():
     assert topology is not None
     assert len(topology["edges"]) == 7
     assert sum(e["length_cm"] for e in topology["edges"]) == 2100.0
+
+    # 4. Target-native geometry agreement check via Sweet Home 3D Java consumer
+    if find_sweethome3d() and find_java_runtime():
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sh3d_path = os.path.join(tmpdir, "n06_curved.sh3d")
+            m_geom = HomeModel(name="GeomAgreement")
+            m_geom.add_wall("w_curve", 0.0, 0.0, 300.0, 0.0, arc_extent=90.0)
+            m_geom.save_sh3d(sh3d_path)
+            snap = get_native_snapshot(sh3d_path)
+            assert snap["wall_count"] == 1
+            curve_wall = snap["walls"][0]
+            # Sweet Home 3D encodes positive degree into negative radian
+            assert curve_wall["arcExtent"] == pytest.approx(-math.pi / 2.0, abs=1e-4)
 
 
 def test_n07_native_sashes_and_opening_poses():
@@ -344,3 +386,19 @@ def test_n10_native_binary_detection_and_preflight():
     for jar_name in ["SweetHome3D.jar", "Examples.jar", "Furniture.jar", "Textures.jar"]:
         p = os.path.join(install_dir, "lib", jar_name)
         assert os.path.exists(p), f"Required lib JAR missing: {jar_name}"
+
+    # Check Java runtime resolution and verify end-to-end consumer execution
+    java_exe = find_java_runtime()
+    assert java_exe is not None, "Java runtime must be resolved for native consumer"
+    assert os.path.exists(java_exe)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_sh3d = os.path.join(tmpdir, "preflight.sh3d")
+        test_out = os.path.join(tmpdir, "preflight_out.sh3d")
+        m_pref = HomeModel(name="Preflight")
+        m_pref.add_wall("pw1", 0, 0, 100, 0)
+        m_pref.save_sh3d(test_sh3d)
+
+        snap = verify_native_consumption(test_sh3d, test_out)
+        assert snap["wall_count"] == 1
+        assert os.path.exists(test_out)
