@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.24.0 (PAC-1 Contract Iteration 33)
+**Document Version:** 2.25.0 (PAC-1 Gate-Family Qualification Iteration 35)
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)
 **Status:** In Active Execution
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -487,3 +487,16 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
   - Merged all 8 Round 33 oracles into `tests/test_core.py`, expanding full repository test suite to **348 passed in 37.79s** (100% green).
   - All 4 built-in architectural templates validate clean (0 errors, 0 warnings).
   - Clean Open Code Review via `ocr delegate` across modified production files (0 blockers, 0 warnings, 0 regressions). (`✅ Completed`)
+
+### Phase 29: PAC-1 Whole-Gate Family Qualification — Advancing All Six Vectors to >= 9.0 (Iteration 35)
+- [x] **Agent-Native Ergonomics Checkpoint Qualification (A01-A04, A07)**:
+  - In `sweethome3d_cli.py`, capability manifest maps complete command inventory across all entity groups and stateful mutation handlers (`wall`, `room`, `opening`, `furniture`, `dimension`, `level`).
+  - Added comprehensive test suite `test_agent_qualification.py` (8 tests): verified project-free discovery (`capability`, `doctor`), explicit project resolution context in all stateful envelopes, transactional failure/rollback across the entire mutation inventory with redo preservation, unified conflict taxonomy on duplicate normalized IDs across all 6 entity owners, versioned finite JSON envelopes with deterministic exit codes (2, 3, 4, 5, 6, 7), and truthful strict validation coverage. (`✅ Completed`)
+- [x] **Architectural Rigor Checkpoint Qualification (T01-T06)**:
+  - Added comprehensive test suite `test_architecture_qualification.py` (6 tests): verified two-face ownership and area reconciliation on adjacent rooms sharing a physical edge, insertion-order permutation invariance of collinear overlapping stations, clean noding of X/T intersections and closed loops, self-intersecting room collision detection, exact closed-form quadratic line/arc and arc/arc analytic stations, and wall split/reverse/delete consistency with opening stations, poses, sloped wall height interpolation, and dimension anchors. (`✅ Completed`)
+- [x] **Native Interoperability Checkpoint Qualification (N01-N09)**:
+  - Added comprehensive test suite `test_native_qualification.py` (8 tests): verified integer version 7400 and offline derived DTD grammar validation with lxml, native DTD child element sequence ordering and unique IDREFs, signed radian wall arc extent and 8-hex color formatting with physical error budget <= 0.01cm, offline archive save/reload roundtrip across all 4 built-in templates (`type36`, `type45`, `studio`, `pavilion`), signed arc sweeps (+/-90, +/-180, +/-270) agreement, native sash physical poses, archive limits (10,000 entries, 100 MiB) with byte-for-byte non-Home.xml resource preservation, and compound SVG path export with typed room hole capability rejection. (`✅ Completed`)
+- [x] **Test Suite & Verification Expansion**:
+  - Full repository test suite expanded from 348 to **370 passed in 43.15s** (100% green).
+  - All 4 built-in architectural templates validate clean (0 errors, 0 warnings).
+  - Clean Open Code Review via `ocr delegate` across all modified production files (0 blockers, 0 warnings, 0 regressions). (`✅ Completed`)

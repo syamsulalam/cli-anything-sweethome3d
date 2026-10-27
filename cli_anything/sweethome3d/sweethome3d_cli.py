@@ -1240,6 +1240,26 @@ def capability_cmd(ctx):
             "door_sweep_collision": True,
             "atomic_transactions": True,
             "headless_roundtrip": True
+        },
+        "commands": {
+            "project": ["new", "open", "save", "info", "validate"],
+            "wall": ["add", "add-loop", "edit", "list", "remove", "reverse", "split"],
+            "room": ["add", "list", "remove"],
+            "opening": ["add", "list", "remove"],
+            "furniture": ["add", "list", "remove", "catalog"],
+            "dimension": ["add", "list", "remove"],
+            "level": ["add", "list", "set-current"],
+            "export": ["json", "svg", "dxf", "html", "sh3d"],
+            "session": ["undo", "redo", "status"],
+            "system": ["capability", "doctor"]
+        },
+        "mutation_inventory": {
+            "wall": ["add", "add-loop", "remove", "reverse", "split"],
+            "room": ["add", "remove"],
+            "opening": ["add", "remove"],
+            "furniture": ["add", "remove"],
+            "dimension": ["add", "remove"],
+            "level": ["add"]
         }
     }
     output_result(ctx, manifest, include_project=False)
