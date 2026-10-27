@@ -2269,17 +2269,27 @@ class HomeModel:
 
             # PAC-1 N02, R17-P1-03: Strip non-native wire attributes ('wall', 'offset', 'type', 'swing')
             for k, v in op.extra_attribs.items():
-                if k not in ("wall", "offset", "type", "swing"):
+                if k not in ("wall", "offset", "type", "swing", "_native_sash"):
                     op_attrib[k] = v
             op_elem = ET.SubElement(root, "doorOrWindow", **op_attrib)
 
             # PAC-1 N02, N09, R19-P1-02, R19-P1-03: Order door child elements according to Sweet Home 3D DTD
             # Native sash child for door swing only if opening_type == 'door' and swing in ('left', 'right')
             if op.opening_type == "door" and op.swing in ("left", "right"):
-                if op.swing == "right":
-                    ET.SubElement(op_elem, "sash", xAxis="0.0", yAxis="0.5", width="1.0", startAngle="0.0", endAngle=str(-math.pi / 2))
-                elif op.swing == "left":
-                    ET.SubElement(op_elem, "sash", xAxis="1.0", yAxis="0.5", width="1.0", startAngle=str(math.pi), endAngle=str(3 * math.pi / 2))
+                sash_handled = False
+                if "_native_sash" in op.extra_attribs:
+                    try:
+                        sash_info = json.loads(op.extra_attribs["_native_sash"])
+                        if sash_info.get("swing") == op.swing:
+                            ET.SubElement(op_elem, "sash", **sash_info.get("attribs", {}))
+                            sash_handled = True
+                    except Exception:
+                        pass
+                if not sash_handled:
+                    if op.swing == "right":
+                        ET.SubElement(op_elem, "sash", xAxis="0.0", yAxis="0.5", width="1.0", startAngle="0.0", endAngle=str(-math.pi / 2))
+                    elif op.swing == "left":
+                        ET.SubElement(op_elem, "sash", xAxis="1.0", yAxis="0.5", width="1.0", startAngle=str(math.pi), endAngle=str(3 * math.pi / 2))
 
             # PAC-1 N02, R18-P1-02, R19-P1-02: Write reversible opening metadata
             OPENING_META = "cli-anything.opening.v1"
@@ -2426,6 +2436,11 @@ class HomeModel:
             if child.tag not in KNOWN_TAGS:
                 model.extra_elements.append(ET.tostring(child, encoding="unicode"))
 
+        # Pre-scan explicit entity IDs in the document to prevent auto-allocated IDs from colliding with later explicit IDs
+        existing_entity_ids = {
+            elem.attrib["id"] for elem in root.iter() if "id" in elem.attrib and elem.attrib["id"]
+        }
+
         model.levels = []
 
         # Levels
@@ -2492,9 +2507,10 @@ class HomeModel:
             parsed_col = _parse_native_color(raw_col)
             r_id = elem.attrib.get("id")
             if not r_id:
-                while f"room_{room_seq}" in model.rooms:
+                while f"room_{room_seq}" in existing_entity_ids or f"room_{room_seq}" in model.rooms:
                     room_seq += 1
                 r_id = f"room_{room_seq}"
+                existing_entity_ids.add(r_id)
                 room_seq += 1
             model.add_room(
                 room_id=r_id,
@@ -2520,9 +2536,10 @@ class HomeModel:
 
             op_id = elem.attrib.get("id")
             if not op_id:
-                while f"op_{op_seq}" in model.openings:
+                while f"op_{op_seq}" in existing_entity_ids or f"op_{op_seq}" in model.openings:
                     op_seq += 1
                 op_id = f"op_{op_seq}"
+                existing_entity_ids.add(op_id)
                 op_seq += 1
             name = elem.attrib.get("name", "Door/Window")
             wall_id = elem.attrib.get("wall")
@@ -2586,6 +2603,13 @@ class HomeModel:
                         native_swing = "left"
                     else:
                         raise UnsupportedFeatureError(f"Unsupported native sash operation on door '{op_id}'; import refused")
+
+                    keys = ('xAxis', 'yAxis', 'width', 'startAngle', 'endAngle')
+                    native_sash_dict = {
+                        "swing": native_swing,
+                        "attribs": {k: first_s.attrib[k] for k in keys if k in first_s.attrib}
+                    }
+                    extra_attribs["_native_sash"] = json.dumps(native_sash_dict)
                 else:
                     raise UnsupportedFeatureError(f"Unsupported native multileaf sash operation ({len(sashes)} sashes) on door '{op_id}'; import refused")
 
@@ -2677,9 +2701,10 @@ class HomeModel:
 
             f_id = elem.attrib.get("id")
             if not f_id:
-                while f"furn_{furn_seq}" in model.furniture:
+                while f"furn_{furn_seq}" in existing_entity_ids or f"furn_{furn_seq}" in model.furniture:
                     furn_seq += 1
                 f_id = f"furn_{furn_seq}"
+                existing_entity_ids.add(f_id)
                 furn_seq += 1
 
             model.add_furniture(
@@ -2709,9 +2734,10 @@ class HomeModel:
 
             d_id = elem.attrib.get("id")
             if not d_id:
-                while f"dim_{dim_seq}" in model.dimensions:
+                while f"dim_{dim_seq}" in existing_entity_ids or f"dim_{dim_seq}" in model.dimensions:
                     dim_seq += 1
                 d_id = f"dim_{dim_seq}"
+                existing_entity_ids.add(d_id)
                 dim_seq += 1
 
             model.add_dimension(
