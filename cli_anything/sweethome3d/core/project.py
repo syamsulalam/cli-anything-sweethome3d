@@ -34,12 +34,12 @@ from cli_anything.sweethome3d.core.native_contract import (
 def strict_json_loads(text):
     """Parses JSON text strictly, refusing nonfinite constants (NaN, Infinity) and nonfinite floats."""
     def reject_constant(token):
-        raise ValueError(f"Nonfinite JSON constant: {token}")
+        raise ValidationRejectedError(f"Nonfinite JSON constant: {token}")
 
     def finite_float(token):
         value = float(token)
         if not math.isfinite(value):
-            raise ValueError(f"Nonfinite JSON number: {token}")
+            raise ValidationRejectedError(f"Nonfinite JSON number: {token}")
         return value
 
     return json.loads(text, parse_constant=reject_constant, parse_float=finite_float)
@@ -54,35 +54,35 @@ def decode_opening_record(element, native_swing=None):
         try:
             record = strict_json_loads(prop.get("value", ""))
         except (ValueError, TypeError, OverflowError) as exc:
-            raise ValueError(f"Corrupt opening metadata: {exc}") from exc
+            raise ValidationRejectedError(f"Corrupt opening metadata: {exc}") from exc
         if type(record) is not dict or set(record) != fields:
-            raise ValueError("Unsupported opening metadata fields")
+            raise UnsupportedFeatureError("Unsupported opening metadata fields")
         if type(record["version"]) is not int or record["version"] != 1:
-            raise ValueError("Unsupported opening metadata version")
+            raise UnsupportedFeatureError("Unsupported opening metadata version")
         if type(record["kind"]) is not str or record["kind"] not in ("door", "window"):
-            raise ValueError("Unsupported opening metadata kind")
+            raise UnsupportedFeatureError("Unsupported opening metadata kind")
         if (type(record["operation"]) is not str or
                 record["operation"] not in ("left", "right", "none", "sliding")):
-            raise ValueError("Unsupported opening metadata operation")
+            raise UnsupportedFeatureError("Unsupported opening metadata operation")
         host = record["host_id"]
         if host is not None and (type(host) is not str or not host):
-            raise ValueError("Invalid opening metadata host_id")
+            raise ValidationRejectedError("Invalid opening metadata host_id")
         value = record["offset_cm"]
         if type(value) not in (int, float):
-            raise ValueError("Opening metadata station must be numeric")
+            raise ValidationRejectedError("Opening metadata station must be numeric")
         try:
             station = float(value)
         except (ValueError, OverflowError) as exc:
-            raise ValueError("Invalid opening metadata station") from exc
+            raise ValidationRejectedError("Invalid opening metadata station") from exc
         if not math.isfinite(station) or station < 0:
-            raise ValueError("Opening metadata station must be finite and nonnegative")
+            raise ValidationRejectedError("Opening metadata station must be finite and nonnegative")
         record = dict(record, offset_cm=station)
         if native_swing is not None and (
             record["kind"] != "door" or record["operation"] != native_swing
         ):
-            raise ValueError("Opening metadata conflicts with native sash; import refused")
+            raise ValidationRejectedError("Opening metadata conflicts with native sash; import refused")
         if resolved is not None and resolved != record:
-            raise ValueError("Conflicting owned opening metadata records")
+            raise ValidationRejectedError("Conflicting owned opening metadata records")
         resolved = record
     return resolved
 
@@ -416,14 +416,14 @@ def validate_resource_name(name: str) -> str:
     import ntpath
     drive, _ = ntpath.splitdrive(name)
     if drive:
-        raise ValueError(f"Drive-prefixed path in ZIP entry: {name}")
+        raise ValidationRejectedError(f"Drive-prefixed path in ZIP entry: {name}")
     if "\\" in name:
-        raise ValueError(f"Backslash in ZIP entry name: {name}")
+        raise ValidationRejectedError(f"Backslash in ZIP entry name: {name}")
     if name.startswith("/"):
-        raise ValueError(f"Absolute path in ZIP entry: {name}")
+        raise ValidationRejectedError(f"Absolute path in ZIP entry: {name}")
     parts = name.split("/")
     if any(p in (".", "..", "") for p in parts):
-        raise ValueError(f"Dangerous path traversal, dot or empty component in ZIP entry: {name}")
+        raise ValidationRejectedError(f"Dangerous path traversal, dot or empty component in ZIP entry: {name}")
     return name
 
 
@@ -431,7 +431,7 @@ def validate_sh3d_zip_archive(zf):
     """Bounded ZIP archive policies (PAC-1 N08): entry limits, max size, traversal protection, duplicate prevention."""
     infolist = zf.infolist()
     if len(infolist) > MAX_ZIP_ENTRIES:
-        raise ValueError(f"ZIP archive exceeds max entry limit: {len(infolist)} > {MAX_ZIP_ENTRIES}")
+        raise ValidationRejectedError(f"ZIP archive exceeds max entry limit: {len(infolist)} > {MAX_ZIP_ENTRIES}")
     seen_names = set()
     home_xml_count = 0
     total_uncompressed = 0
@@ -439,17 +439,17 @@ def validate_sh3d_zip_archive(zf):
         name = info.filename
         validate_resource_name(name)
         if name in seen_names:
-            raise ValueError(f"Duplicate entry in ZIP archive: {name}")
+            raise ValidationRejectedError(f"Duplicate entry in ZIP archive: {name}")
         seen_names.add(name)
         if name == "Home.xml":
             home_xml_count += 1
         if info.file_size > MAX_ZIP_SINGLE_ENTRY_SIZE:
-            raise ValueError(f"ZIP entry exceeds single-file size limit: {name} ({info.file_size} bytes)")
+            raise ValidationRejectedError(f"ZIP entry exceeds single-file size limit: {name} ({info.file_size} bytes)")
         total_uncompressed += info.file_size
         if total_uncompressed > MAX_ZIP_UNCOMPRESSED_SIZE:
-            raise ValueError(f"ZIP archive exceeds total uncompressed size limit: {total_uncompressed} bytes")
+            raise ValidationRejectedError(f"ZIP archive exceeds total uncompressed size limit: {total_uncompressed} bytes")
     if home_xml_count != 1:
-        raise ValueError(f"Expected exactly one 'Home.xml' entry, found {home_xml_count}")
+        raise ValidationRejectedError(f"Expected exactly one 'Home.xml' entry, found {home_xml_count}")
 
 
 class HomeModel:
@@ -474,7 +474,7 @@ class HomeModel:
                   extra_attribs=None, extra_children=None):
         level_id = str(level_id)
         if self.get_level(level_id):
-            raise ValueError(f"Level '{level_id}' already exists.")
+            raise ValidationRejectedError(f"Level '{level_id}' already exists.")
         lvl = Level(level_id, name, elevation_cm, height_cm, floor_thickness_cm, extra_attribs, extra_children)
         self.levels.append(lvl)
         return lvl
@@ -536,7 +536,7 @@ class HomeModel:
 
         pts = [(float(p[0]), float(p[1])) for p in points]
         if len(pts) < 2:
-            raise ValueError("Wall loop requires at least 2 points.")
+            raise ValidationRejectedError("Wall loop requires at least 2 points.")
         
         sep = "" if id_prefix.endswith("_") else "_"
         created = []
@@ -580,7 +580,6 @@ class HomeModel:
         if wall_id not in self.walls:
             raise ValidationRejectedError(f"Wall '{wall_id}' not found in project.")
         wall = self.walls[wall_id]
-
         def finite(value, label):
             try:
                 number = float(value)
@@ -589,48 +588,58 @@ class HomeModel:
             if not math.isfinite(number):
                 raise ValidationRejectedError(f"{label} must be finite")
             return number
-
-        finite(wall.x_start, "wall x_start")
-        finite(wall.y_start, "wall y_start")
-        finite(wall.x_end, "wall x_end")
-        finite(wall.y_end, "wall y_end")
-        th = finite(wall.thickness, "wall thickness")
-        if th <= 0:
-            raise ValidationRejectedError("wall thickness must be positive")
-        h0 = finite(wall.height, "wall height")
-        if h0 <= 0:
-            raise ValidationRejectedError("wall height must be positive")
-        finite(wall.arc_extent, "wall arc_extent")
-
-        L = finite(wall.length, "wall length")
-        if L <= 0:
-            raise ValidationRejectedError("wall length must be positive")
-
-        h1_val = wall.extra_attribs.get("heightAtEnd", wall.height) if wall.extra_attribs else wall.height
-        h1 = finite(h1_val, "heightAtEnd")
-        if h1 <= 0:
-            raise ValidationRejectedError("heightAtEnd must be positive")
-
-        hosted_openings = [op for op in self.openings.values() if op.wall_id == wall_id]
-        door_poses = {}
-        for op in hosted_openings:
-            o = finite(op.offset_cm, f"opening {op.id} offset")
-            w = finite(op.width_cm, f"opening {op.id} width")
-            finite(op.height_cm, f"opening {op.id} height")
-            finite(op.elevation_cm, f"opening {op.id} elevation")
-            if o < -1e-4 or w <= 0 or o + w > L + 1e-4:
-                raise ValidationRejectedError(f"opening {op.id} interval outside host")
-            try:
-                pose = op.get_effective_geometry(wall)
-                door_poses[op.id] = pose
-            except Exception as exc:
-                raise ValidationRejectedError(f"opening {op.id} physical pose unresolvable") from exc
-
-        return wall, L, h1, door_poses
+        for name in ('x_start', 'y_start', 'x_end', 'y_end'):
+            finite(getattr(wall, name), f"wall {name}")
+        thickness = finite(wall.thickness, 'wall thickness')
+        height = finite(wall.height, 'wall height')
+        sweep = finite(wall.arc_extent, 'wall sweep')
+        if thickness <= 0 or height <= 0 or abs(sweep) >= 360:
+            raise ValidationRejectedError('invalid wall physical domain')
+        chord = finite(wall.chord_length, 'wall chord')
+        if chord <= 0:
+            raise ValidationRejectedError('wall chord must be positive')
+        if sweep:
+            sine = math.sin(abs(math.radians(sweep))/2)
+            if not math.isfinite(sine) or sine <= 0:
+                raise ValidationRejectedError('singular curved wall sweep')
+            radius = chord / (2 * sine)
+            if not math.isfinite(radius) or radius <= thickness/2:
+                raise ValidationRejectedError('invalid curved wall inner radius')
+        length = finite(wall.length, 'wall length')
+        if length <= 0:
+            raise ValidationRejectedError('wall length must be positive')
+        end_height = finite(wall.extra_attribs.get('heightAtEnd', height), 'heightAtEnd')
+        if end_height <= 0:
+            raise ValidationRejectedError('heightAtEnd must be positive')
+        poses = {}
+        for op in self.openings.values():
+            if op.wall_id != wall_id:
+                continue
+            offset = finite(op.offset_cm, f'opening {op.id} offset')
+            width = finite(op.width_cm, f'opening {op.id} width')
+            op_height = finite(op.height_cm, f'opening {op.id} height')
+            finite(op.elevation_cm, f'opening {op.id} elevation')
+            if offset < 0 or width <= 0 or op_height <= 0 or offset + width > length + 1e-4:
+                raise ValidationRejectedError(f'opening {op.id} interval/height invalid')
+            if op.depth_cm is not None and finite(op.depth_cm, f'opening {op.id} depth') <= 0:
+                raise ValidationRejectedError(f'opening {op.id} depth must be positive')
+            for name in ('x_cm','y_cm','angle_deg'):
+                if getattr(op,name) is not None:
+                    finite(getattr(op,name), f'opening {op.id} {name}')
+            pose = op.get_effective_geometry(wall)
+            if pose is None:
+                raise ValidationRejectedError(f'opening {op.id} pose unresolved')
+            finite(pose['angle_deg'], f'opening {op.id} resolved angle')
+            for key in ('center','p1','p2','hinge','latch','open_endpoint'):
+                for coordinate in pose[key]:
+                    finite(coordinate, f'opening {op.id} {key}')
+            poses[op.id] = pose
+        return wall, length, end_height, poses
 
     def reverse_wall(self, wall_id):
         """Reverses a wall's direction while preserving physical opening geometry and normalizing face intent (PAC-1 T06, R30, R31)."""
         wall, total_len, h1, door_poses = self._prepare_wall_edit(wall_id)
+        wall_id = wall.id
 
         # Atomic rollback snapshots across all direct objects (PAC-1 T06, R30, R31)
         old_walls, old_openings = dict(self.walls), dict(self.openings)
@@ -725,6 +734,7 @@ class HomeModel:
         Re-anchors hosted openings and retargets native joins. Rejects split across an opening or non-finite inputs.
         """
         wall, total_len, h1, door_poses = self._prepare_wall_edit(wall_id)
+        wall_id = wall.id
 
         try:
             split_s = float(split_offset_cm)
@@ -778,8 +788,8 @@ class HomeModel:
             )
             if wall.arc_extent != 0.0:
                 frac = (total_len - split_s) / total_len
-                wall2.arc_extent = round(wall.arc_extent * frac, 4)
-                wall.arc_extent = round(wall.arc_extent * (split_s / total_len), 4)
+                wall2.arc_extent = wall.arc_extent * frac
+                wall.arc_extent = wall.arc_extent * (split_s / total_len)
 
             # Update slope on wall2 and wall1
             has_slope = "heightAtEnd" in wall.extra_attribs
@@ -868,7 +878,7 @@ class HomeModel:
         if opening_id in self.openings and not replace:
             raise EntityConflictError(f"Opening with ID '{opening_id}' already exists in project.")
         if wall_id is not None and wall_id not in self.walls:
-            raise ValueError(f"Wall '{wall_id}' does not exist.")
+            raise ValidationRejectedError(f"Wall '{wall_id}' does not exist.")
         wall = self.walls.get(wall_id) if wall_id else None
         eff_level = wall.level_id if wall else level_id
         op = Opening(opening_id, name, wall_id, offset_cm, width_cm, height_cm, opening_type, swing,
@@ -1109,9 +1119,9 @@ class HomeModel:
 
                     for other in sources[1:]:
                         if abs(other.thickness - base_w.thickness) > 1e-3:
-                            raise ValueError(f"Conflicting wall thickness on overlapping segment between {base_w.id} ({base_w.thickness}cm) and {other.id} ({other.thickness}cm)")
+                            raise EntityConflictError(f"Conflicting wall thickness on overlapping segment between {base_w.id} ({base_w.thickness}cm) and {other.id} ({other.thickness}cm)")
                         if abs(other.height - base_w.height) > 1e-3:
-                            raise ValueError(f"Conflicting wall height on overlapping segment between {base_w.id} ({base_w.height}cm) and {other.id} ({other.height}cm)")
+                            raise EntityConflictError(f"Conflicting wall height on overlapping segment between {base_w.id} ({base_w.height}cm) and {other.id} ({other.height}cm)")
 
                         # Compare and merge face intent in normalized physical orientation
                         dx2, dy2 = other.x_end - other.x_start, other.y_end - other.y_start
@@ -1138,9 +1148,9 @@ class HomeModel:
                             curr_r = merged_attribs.get(right_k)
 
                             if curr_l and other_l and curr_l != other_l:
-                                raise ValueError(f"Conflicting wall face color/material intent ('{left_k}') on overlapping segment between {base_w.id} and {other.id}")
+                                raise EntityConflictError(f"Conflicting wall face color/material intent ('{left_k}') on overlapping segment between {base_w.id} and {other.id}")
                             if curr_r and other_r and curr_r != other_r:
-                                raise ValueError(f"Conflicting wall face color/material intent ('{right_k}') on overlapping segment between {base_w.id} and {other.id}")
+                                raise EntityConflictError(f"Conflicting wall face color/material intent ('{right_k}') on overlapping segment between {base_w.id} and {other.id}")
 
                             if other_l:
                                 merged_attribs[left_k] = other_l
@@ -1151,7 +1161,7 @@ class HomeModel:
                         for k, v in other.extra_attribs.items():
                             if k not in side_keys:
                                 if k in merged_attribs and merged_attribs[k] != v:
-                                    raise ValueError(f"Conflicting attribute '{k}' on overlapping segment between {base_w.id} and {other.id}")
+                                    raise ValidationRejectedError(f"Conflicting attribute '{k}' on overlapping segment between {base_w.id} and {other.id}")
                                 merged_attribs[k] = v
 
                         # PAC-1 T04, T06, N09, R16-P1-01, R17-P1-01: Merge extra children with semantic property validation and side-role normalization
@@ -1201,7 +1211,7 @@ class HomeModel:
                                 p_name, p_val = info
                                 if p_name in prop_map:
                                     if prop_map[p_name] != p_val:
-                                        raise ValueError(f"Conflicting wall property '{p_name}' ('{prop_map[p_name]}' vs '{p_val}') on overlapping segment between {base_w.id} and {other.id}")
+                                        raise EntityConflictError(f"Conflicting wall property '{p_name}' ('{prop_map[p_name]}' vs '{p_val}') on overlapping segment between {base_w.id} and {other.id}")
                                     # identical value coalesces, do not duplicate
                                 else:
                                     prop_map[p_name] = p_val
@@ -1245,7 +1255,7 @@ class HomeModel:
                                 matched_atom = (a_idx, s_start, s_end, is_aligned, geom)
                                 break
                         if matched_atom is None:
-                            raise ValueError(f"Cannot node walls: opening '{op.id}' ({op.name}) on wall '{w.id}' spans across split point or extends beyond wall boundaries")
+                            raise ValidationRejectedError(f"Cannot node walls: opening '{op.id}' ({op.name}) on wall '{w.id}' spans across split point or extends beyond wall boundaries")
                         opening_remaps[op.id] = matched_atom
 
                 # Allocate unique atom IDs, prioritizing preservation of unchanged walls
@@ -1303,7 +1313,7 @@ class HomeModel:
             # Enforce model validity before committing
             val = self.validate()
             if not val["valid"]:
-                raise ValueError(f"Wall noding produced invalid model: {val['errors']}")
+                raise ValidationRejectedError(f"Wall noding produced invalid model: {val['errors']}")
 
             return total_noded
 
@@ -2170,7 +2180,7 @@ class HomeModel:
 
         # PAC-1 T07, E03, N09, R18-P1-01: Native room holes require a supported decomposition; export refused
         if any(r.holes for r in self.rooms.values()):
-            raise ValueError("Native room holes require a supported decomposition; export refused")
+            raise UnsupportedFeatureError("Native room holes require a supported decomposition; export refused")
 
         # Gate N01: Sweet Home 3D native wire version is integer 7400 (not marketing string "7.5")
         native_ver = "7400" if (self.version == "7.5" or not self.version) else str(self.version)
@@ -2359,7 +2369,7 @@ class HomeModel:
             e_end = getattr(dim, "elevation_end_cm", dim.elevation_cm)
             # PAC-1 C01, N03, E07, R20-P1-03: Dimension endpoint elevations must be finite before native XML emission
             if not math.isfinite(e_start) or not math.isfinite(e_end):
-                raise ValueError(f"Dimension '{dim.id}' endpoint elevations must be finite: start={e_start}, end={e_end}")
+                raise ValidationRejectedError(f"Dimension '{dim.id}' endpoint elevations must be finite: start={e_start}, end={e_end}")
             d_attrib = {
                 "id": dim.id, "level": dim.level_id,
                 "xStart": str(dim.x_start), "yStart": str(dim.y_start),
@@ -2399,7 +2409,7 @@ class HomeModel:
     def from_xml(cls, xml_text, *, dialect="native-v7400", validate=True):
         """Parses Sweet Home 3D Home.xml into a HomeModel instance preserving unmodeled elements."""
         if dialect != "native-v7400":
-            raise ValueError("Use an explicit legacy conversion before native import")
+            raise UnsupportedFeatureError("Use an explicit legacy conversion before native import")
         assert_native_wire(xml_text)
         root = ET.fromstring(xml_text)
         model = cls(
@@ -2554,9 +2564,9 @@ class HomeModel:
                     elif tot_err_l <= 0.01:
                         native_swing = "left"
                     else:
-                        raise ValueError(f"Unsupported native sash operation on door '{op_id}'; import refused")
+                        raise UnsupportedFeatureError(f"Unsupported native sash operation on door '{op_id}'; import refused")
                 else:
-                    raise ValueError(f"Unsupported native multileaf sash operation ({len(sashes)} sashes) on door '{op_id}'; import refused")
+                    raise UnsupportedFeatureError(f"Unsupported native multileaf sash operation ({len(sashes)} sashes) on door '{op_id}'; import refused")
 
             # 2. Check and decode cli-anything.opening.v1 metadata properties (PAC-1 N07, N09, R23-P1-01)
             resolved_meta = decode_opening_record(elem, native_swing=native_swing)
@@ -2697,17 +2707,17 @@ class HomeModel:
         }
         total_entries = len(filtered_entries) + 1  # +1 for Home.xml
         if total_entries > MAX_ZIP_ENTRIES:
-            raise ValueError(f"Generated ZIP archive exceeds max entry limit: {total_entries} > {MAX_ZIP_ENTRIES}")
+            raise ValidationRejectedError(f"Generated ZIP archive exceeds max entry limit: {total_entries} > {MAX_ZIP_ENTRIES}")
 
         total_uncompressed = len(xml_bytes)
         for fname, data_bytes in filtered_entries.items():
             validate_resource_name(fname)
             entry_size = len(data_bytes)
             if entry_size > MAX_ZIP_SINGLE_ENTRY_SIZE:
-                raise ValueError(f"ZIP entry exceeds single-file size limit: {fname}")
+                raise ValidationRejectedError(f"ZIP entry exceeds single-file size limit: {fname}")
             total_uncompressed += entry_size
             if total_uncompressed > MAX_ZIP_UNCOMPRESSED_SIZE:
-                raise ValueError(f"Generated ZIP archive exceeds total size limit: {total_uncompressed} > {MAX_ZIP_UNCOMPRESSED_SIZE}")
+                raise ValidationRejectedError(f"Generated ZIP archive exceeds total size limit: {total_uncompressed} > {MAX_ZIP_UNCOMPRESSED_SIZE}")
 
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
         tmp_target = filepath + ".tmp"
@@ -2725,15 +2735,18 @@ class HomeModel:
             raise FileNotFoundError(f"Project file '{filepath}' not found.")
         extra_entries = {}
         xml_content = None
-        with zipfile.ZipFile(filepath, "r") as zf:
-            validate_sh3d_zip_archive(zf)
-            for item in zf.infolist():
-                if item.filename == "Home.xml":
-                    xml_content = zf.read("Home.xml").decode("utf-8")
-                else:
-                    extra_entries[item.filename] = zf.read(item.filename)
+        try:
+            with zipfile.ZipFile(filepath, "r") as zf:
+                validate_sh3d_zip_archive(zf)
+                for item in zf.infolist():
+                    if item.filename == "Home.xml":
+                        xml_content = zf.read("Home.xml").decode("utf-8")
+                    else:
+                        extra_entries[item.filename] = zf.read(item.filename)
+        except (zipfile.BadZipFile, UnicodeDecodeError) as exc:
+            raise ValidationRejectedError("Invalid native archive input") from exc
         if not xml_content:
-            raise ValueError("Corrupted .sh3d file: missing 'Home.xml' entry.")
+            raise ValidationRejectedError("Corrupted .sh3d file: missing 'Home.xml' entry.")
         model = cls.from_xml(xml_content)
         model.extra_zip_entries = extra_entries
         return model
@@ -2793,7 +2806,7 @@ class HomeModel:
         for lvl_data in d.get("levels", []):
             lvl_obj = Level.from_dict(lvl_data)
             if lvl_obj.id in seen_levels:
-                raise ValueError(f"Duplicate level ID '{lvl_obj.id}' in import data.")
+                raise EntityConflictError(f"Duplicate level ID '{lvl_obj.id}' in import data.")
             seen_levels.add(lvl_obj.id)
             model.levels.append(lvl_obj)
         if not model.levels:
@@ -2801,26 +2814,26 @@ class HomeModel:
         for w in d.get("walls", []):
             wall_obj = Wall.from_dict(w)
             if wall_obj.id in model.walls:
-                raise ValueError(f"Duplicate wall ID '{wall_obj.id}' in import data.")
+                raise EntityConflictError(f"Duplicate wall ID '{wall_obj.id}' in import data.")
             model.walls[wall_obj.id] = wall_obj
         for r in d.get("rooms", []):
             room_obj = Room.from_dict(r)
             if room_obj.id in model.rooms:
-                raise ValueError(f"Duplicate room ID '{room_obj.id}' in import data.")
+                raise EntityConflictError(f"Duplicate room ID '{room_obj.id}' in import data.")
             model.rooms[room_obj.id] = room_obj
         for op in d.get("openings", []):
             op_obj = Opening.from_dict(op)
             if op_obj.id in model.openings:
-                raise ValueError(f"Duplicate opening ID '{op_obj.id}' in import data.")
+                raise EntityConflictError(f"Duplicate opening ID '{op_obj.id}' in import data.")
             model.openings[op_obj.id] = op_obj
         for f in d.get("furniture", []):
             f_obj = Furniture.from_dict(f)
             if f_obj.id in model.furniture:
-                raise ValueError(f"Duplicate furniture ID '{f_obj.id}' in import data.")
+                raise EntityConflictError(f"Duplicate furniture ID '{f_obj.id}' in import data.")
             model.furniture[f_obj.id] = f_obj
         for dim in d.get("dimensions", []):
             dim_obj = DimensionLine.from_dict(dim)
             if dim_obj.id in model.dimensions:
-                raise ValueError(f"Duplicate dimension ID '{dim_obj.id}' in import data.")
+                raise EntityConflictError(f"Duplicate dimension ID '{dim_obj.id}' in import data.")
             model.dimensions[dim_obj.id] = dim_obj
         return model

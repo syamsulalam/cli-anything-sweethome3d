@@ -621,7 +621,7 @@ def wall_add_loop(ctx, id_prefix, points, closed, thickness, height, level_id):
                 x, y = pair.strip().split(",")
                 pts.append((float(x), float(y)))
     except Exception as e:
-        output_error(ctx, f"Invalid points format: {e}")
+        output_error(ctx, ValidationRejectedError(f"Invalid points format: {e}"))
 
     try:
         with session_mgr.transaction():
@@ -662,7 +662,7 @@ def wall_remove(ctx, wall_id):
             session_mgr.push_state()
             removed = session_mgr.model.remove_wall(wall_id)
             if not removed:
-                raise ValueError(f"Wall '{wall_id}' not found.")
+                raise ValidationRejectedError(f"Wall '{wall_id}' not found.")
             session_mgr.save_session()
         output_result(ctx, {"removed": wall_id})
     except Exception as e:
@@ -749,7 +749,7 @@ def room_add(ctx, room_id, name, points, color, level_id, with_walls, wall_thick
                     x, y = pair.strip().split(",")
                     pts.append((float(x), float(y)))
     except Exception as e:
-        output_error(ctx, f"Invalid points format: {e}")
+        output_error(ctx, ValidationRejectedError(f"Invalid points format: {e}"))
 
     try:
         with session_mgr.transaction():
@@ -792,7 +792,7 @@ def room_remove(ctx, room_id):
             session_mgr.push_state()
             removed = session_mgr.model.remove_room(room_id)
             if not removed:
-                raise ValueError(f"Room '{room_id}' not found.")
+                raise ValidationRejectedError(f"Room '{room_id}' not found.")
             session_mgr.save_session()
         output_result(ctx, {"removed": room_id})
     except Exception as e:
@@ -805,7 +805,7 @@ def room_area(ctx, room_id):
     """Get the exact verified area of a room in m²."""
     r = session_mgr.model.rooms.get(room_id)
     if not r:
-        output_error(ctx, f"Room '{room_id}' not found.")
+        output_error(ctx, ValidationRejectedError(f"Room '{room_id}' not found."))
     output_result(ctx, {"room_id": r.id, "name": r.name, "area_m2": r.area_m2})
 
 # ==============================================================================
@@ -861,7 +861,7 @@ def opening_remove(ctx, opening_id):
             session_mgr.push_state()
             removed = session_mgr.model.remove_opening(opening_id)
             if not removed:
-                raise ValueError(f"Opening '{opening_id}' not found.")
+                raise ValidationRejectedError(f"Opening '{opening_id}' not found.")
             session_mgr.save_session()
         output_result(ctx, {"removed": opening_id})
     except Exception as e:
@@ -951,7 +951,7 @@ def furniture_remove(ctx, furniture_id):
             session_mgr.push_state()
             removed = session_mgr.model.remove_furniture(furniture_id)
             if not removed:
-                raise ValueError(f"Furniture '{furniture_id}' not found.")
+                raise ValidationRejectedError(f"Furniture '{furniture_id}' not found.")
             session_mgr.save_session()
         output_result(ctx, {"removed": furniture_id})
     except Exception as e:
@@ -1015,7 +1015,7 @@ def dimension_remove(ctx, dimension_id):
             session_mgr.push_state()
             removed = session_mgr.model.remove_dimension(dimension_id)
             if not removed:
-                raise ValueError(f"Dimension '{dimension_id}' not found.")
+                raise ValidationRejectedError(f"Dimension '{dimension_id}' not found.")
             session_mgr.save_session()
         output_result(ctx, {"removed": dimension_id})
     except Exception as e:
@@ -1248,13 +1248,13 @@ def decode_diagnostic_session(text):
     """Strictly validates diagnostic session envelope and root schema (PAC-1 A08, R23-P1-02)."""
     data = strict_json_loads(text)
     if type(data) is not dict:
-        raise ValueError("Session JSON root must be an object")
+        raise ValidationRejectedError("Session JSON root must be an object")
     if type(data.get("model")) is not dict:
-        raise ValueError("Session model must be an object")
+        raise ValidationRejectedError("Session model must be an object")
     if "revision" in data and (
         type(data["revision"]) is not int or data["revision"] < 0
     ):
-        raise ValueError("Session revision must be a nonnegative integer")
+        raise ValidationRejectedError("Session revision must be a nonnegative integer")
     return data
 
 

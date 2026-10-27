@@ -692,7 +692,7 @@ class SessionManager:
     def set_current_level(self, level_id):
         with self.transaction():
             if not self.model.get_level(level_id):
-                raise ValueError(f"Level '{level_id}' does not exist in model.")
+                raise ValidationRejectedError(f"Level '{level_id}' does not exist in model.")
             self.current_level_id = level_id
             self.save_session()
             return level_id
@@ -771,7 +771,11 @@ class SessionManager:
                 candidate = HomeModel.load_sh3d(filepath)
             elif filepath.endswith(".json"):
                 with open(filepath, "r", encoding="utf-8") as f:
-                    candidate = HomeModel.from_dict(json.load(f))
+                    try:
+                        decoded = json.load(f)
+                    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                        raise ValidationRejectedError("Invalid project JSON input") from exc
+                    candidate = HomeModel.from_dict(decoded)
             else:
                 raise UnsupportedFeatureError("Unsupported project format. Must be .sh3d or .json.")
             

@@ -4311,3 +4311,125 @@ def test_r31_05_public_invalid_split_uses_validation_taxonomy_and_preserves_stat
 
 def test_r31_05_unknown_valueerror_containing_user_conflict_word_stays_internal():
     assert command.classify_error(ValueError('unexpected conflict-wall branch')) == (1,'ERROR')
+
+
+# ==============================================================================
+# PAC-1 Round 32 Root Closure and Boundary Oracles (R28-P1-01, R28-P1-03, R28-P1-05)
+# ==============================================================================
+
+@pytest.mark.parametrize('operation', ['reverse', 'split'])
+@pytest.mark.parametrize('poison', ['zero_height', 'negative_depth', 'nan_depth', 'nan_xy', 'nan_angle', 'full_circle'])
+def test_prepared_edit_rejects_complete_remaining_physical_domain(operation, poison):
+    m=HomeModel(); w=m.add_wall('w',0,0,400,0)
+    d=m.add_opening('d','Door',wall_id='w',offset_cm=250,width_cm=90)
+    if poison=='zero_height': d.height_cm=0
+    elif poison=='negative_depth': d.depth_cm=-1
+    elif poison=='nan_depth': d.depth_cm=float('nan')
+    elif poison=='nan_xy': d.x_cm=float('nan'); d.y_cm=0; d.angle_deg=0
+    elif poison=='nan_angle': d.x_cm=295; d.y_cm=0; d.angle_deg=float('nan')
+    else: w.arc_extent=360
+    before=repr(m.to_dict())
+    with pytest.raises(ValueError):
+        if operation=='reverse': m.reverse_wall('w')
+        else: m.split_wall('w',200,'tail')
+    assert repr(m.to_dict())==before
+    assert m.walls['w'] is w and m.openings['d'] is d
+
+
+@pytest.mark.parametrize('operation', ['reverse', 'split'])
+def test_edit_uses_canonical_wall_identity_returned_by_preparation(operation):
+    m=HomeModel(); m.add_wall(1,0,0,400,0)
+    d=m.add_opening('d','Door',wall_id='1',offset_cm=250,width_cm=90)
+    assert d.wall_id=='1' and '1' in m.walls
+    before=d.get_effective_geometry(m.walls['1'])
+    if operation=='reverse': m.reverse_wall(1)
+    else:
+        m.split_wall(1,200,'tail')
+        assert d.wall_id=='tail' and d.offset_cm==50
+    after=d.get_effective_geometry(m.walls[d.wall_id])
+    for key in ('center','hinge','open_endpoint'):
+        assert after[key]==pytest.approx(before[key],abs=.0001)
+
+
+def test_split_keeps_unrounded_internal_sweeps_within_physical_budget():
+    m=HomeModel(); source=Wall('source',-90000,0,90000,0,arc_extent=90)
+    m.add_wall('w',-90000,0,90000,0,arc_extent=90)
+    assert m.validate()['valid'] is True
+    fraction=.3333338
+    _,tail=m.split_wall('w',source.length*fraction,'tail')
+    expected=source.point_at_offset(source.length*(fraction+(1-fraction)*.5))
+    actual=tail.point_at_offset(tail.length*.5)
+    assert math.dist(expected,actual)<=.01
+
+
+@pytest.mark.parametrize('extent', [360,-360,720])
+def test_native_publication_rejects_singular_or_out_of_domain_sweep(extent):
+    m=HomeModel(); m.add_wall('w',0,0,300,0,arc_extent=extent)
+    with pytest.raises(ValueError): m.to_xml()
+
+
+def test_public_malformed_native_wire_is_validation_not_internal_error(tmp_path):
+    state=tmp_path/'session.json'; mgr=SessionManager(str(state)); mgr.save_session(); before=state.read_bytes()
+    artifact=tmp_path/'bad.sh3d'
+    with zipfile.ZipFile(artifact,'w') as z:
+        z.writestr('Home.xml','<home version="7400" invented="bad"/>')
+    r=CliRunner().invoke(cli_module.cli,['--json','--session',str(state),'project','open',str(artifact)])
+    assert r.exit_code==3,r.output
+    assert json.loads(r.stdout)['error']['code']=='VALIDATION_REJECTED'
+    assert state.read_bytes()==before
+
+
+@pytest.mark.parametrize('extension,payload',[('json',b'{bad json'),('sh3d',b'not a ZIP')])
+def test_public_known_input_decoders_emit_typed_rejection(tmp_path, extension, payload):
+    state=tmp_path/'session.json'; mgr=SessionManager(str(state)); mgr.save_session(); before=state.read_bytes()
+    artifact=tmp_path/('bad.'+extension); artifact.write_bytes(payload)
+    r=CliRunner().invoke(cli_module.cli,['--json','--session',str(state),'project','open',str(artifact)])
+    assert r.exit_code==3,r.output
+    assert json.loads(r.stdout)['error']['code']=='VALIDATION_REJECTED'
+    assert state.read_bytes()==before
+
+
+def test_public_unsupported_native_holes_has_typed_capability_error(tmp_path):
+    state=tmp_path/'session.json'; mgr=SessionManager(str(state))
+    room=mgr.model.add_room('r','Room',[(0,0),(400,0),(400,400),(0,400)])
+    room.holes=[[(100,100),(200,100),(200,200),(100,200)]]
+    mgr.save_session(); before=state.read_bytes()
+    target=tmp_path/'plan.sh3d'; target.write_bytes(b'predecessor')
+    r=CliRunner().invoke(cli_module.cli,['--json','--session',str(state),'export','sh3d','-o',str(target)])
+    assert r.exit_code==5,r.output
+    assert json.loads(r.stdout)['error']['code']=='UNSUPPORTED'
+    assert target.read_bytes()==b'predecessor' and state.read_bytes()==before
+
+
+def test_public_malformed_room_points_are_typed_validation(tmp_path):
+    state=tmp_path/'session.json'; mgr=SessionManager(str(state)); mgr.save_session(); before=state.read_bytes()
+    r=CliRunner().invoke(cli_module.cli,['--json','--session',str(state),'room','add','--id','r','--name','Room','--points','bad'])
+    assert r.exit_code==3,r.output
+    assert json.loads(r.stdout)['error']['code']=='VALIDATION_REJECTED'
+    assert state.read_bytes()==before
+
+
+@pytest.mark.parametrize('reverse_order', [False,True])
+def test_closed_reciprocal_arc_root_preserves_order_independent_incidence(reverse_order):
+    a=Wall('a',0,0,4000,0,arc_extent=90)
+    p,q=a.point_at_offset(.1),a.point_at_offset(a.length*.8)
+    b=Wall('b',*q,*p,arc_extent=-90*((a.length*.8-.1)/a.length))
+    records=compute_wall_analytic_stations([b,a] if reverse_order else [a,b])
+    assert all('a' in r['peer_ids'] for r in records['b'])
+    assert any(abs(r['station_cm']-.1)<.01 and 'b' in r['peer_ids'] for r in records['a'])
+
+
+@pytest.mark.parametrize('extent',[.1,90])
+def test_existing_native_shallow_and_normal_positive_controls(extent):
+    m=HomeModel(); m.add_wall('w',0,0,300,0,arc_extent=extent)
+    loaded=HomeModel.from_xml(m.to_xml(),validate=False)
+    assert loaded.walls['w'].arc_extent==pytest.approx(extent)
+
+
+def test_public_typed_unsupported_project_extension_control(tmp_path):
+    state=tmp_path/'session.json'; mgr=SessionManager(str(state)); mgr.save_session(); before=state.read_bytes()
+    artifact=tmp_path/'file.unsupported'; artifact.write_bytes(b'unsupported')
+    r=CliRunner().invoke(cli_module.cli,['--json','--session',str(state),'project','open',str(artifact)])
+    assert r.exit_code==5,r.output
+    assert json.loads(r.stdout)['error']['code']=='UNSUPPORTED'
+    assert state.read_bytes()==before

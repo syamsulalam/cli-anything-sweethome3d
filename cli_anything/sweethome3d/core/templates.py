@@ -1,4 +1,5 @@
 """Architectural floor plan templates and preset typologies for Sweet Home 3D."""
+from cli_anything.sweethome3d.core.exceptions import ValidationRejectedError
 
 def apply_template(model, template_type, name=None):
     """Populates a HomeModel with an architectural typology template.
@@ -11,7 +12,7 @@ def apply_template(model, template_type, name=None):
     """
     typ = template_type.lower().strip()
     if typ not in ["type36", "type45", "studio", "pavilion"]:
-        raise ValueError(f"Unknown template type '{template_type}'. Available: type36, type45, studio, pavilion")
+        raise ValidationRejectedError(f"Unknown template type '{template_type}'. Available: type36, type45, studio, pavilion")
 
     # Reset existing entities
     model.walls.clear()

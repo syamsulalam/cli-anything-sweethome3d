@@ -1,5 +1,6 @@
 """Directed wall and room face topology for Sweet Home 3D models (PAC-1 T01-T06)."""
 from __future__ import annotations
+from cli_anything.sweethome3d.core.exceptions import EntityConflictError, ValidationRejectedError
 
 import hashlib
 import json
@@ -25,20 +26,20 @@ def build_room_face_topology(model):
     records = []
     levels = {level.id for level in model.levels}
     if any(entity.level_id not in levels for entity in [*model.walls.values(), *model.rooms.values()]):
-        raise ValueError("MISSING_LEVEL_REFERENCE")
+        raise ValidationRejectedError("MISSING_LEVEL_REFERENCE")
     for level in model.levels:
         walls = sorted((w for w in model.walls.values() if w.level_id == level.id),
                        key=lambda w: w.id)
         if any(w.arc_extent != 0.0 for w in walls):
-            raise ValueError("UNSUPPORTED_CURVED_FACE_TOPOLOGY: use analytic arrangement slice")
+            raise ValidationRejectedError("UNSUPPORTED_CURVED_FACE_TOPOLOGY: use analytic arrangement slice")
         paths = []
         for w in walls:
             values = [w.x1, w.y1, w.x2, w.y2, w.thickness, w.height]
             if not all(math.isfinite(v) for v in values) or min(w.thickness, w.height) <= 0:
-                raise ValueError("Invalid wall geometry")
+                raise ValidationRejectedError("Invalid wall geometry")
             line = LineString([(w.x1, w.y1), (w.x2, w.y2)])
             if line.length <= numeric_eps:
-                raise ValueError("Zero-length wall")
+                raise ValidationRejectedError("Zero-length wall")
             paths.append((w, line))
         rooms = sorted((r for r in model.rooms.values() if r.level_id == level.id),
                        key=lambda r: r.id)
@@ -46,7 +47,7 @@ def build_room_face_topology(model):
         for i, (_, region) in enumerate(regions):
             for _, other in regions[i + 1:]:
                 if region.intersection(other).area > numeric_eps ** 2:
-                    raise ValueError("ROOM_OWNERSHIP_CONFLICT: overlapping room interiors")
+                    raise EntityConflictError("ROOM_OWNERSHIP_CONFLICT: overlapping room interiors")
         rings = []
         for room, _ in regions:
             for hole, points in [(False, room.points)] + [(True, p) for p in (room.holes or [])]:
@@ -78,7 +79,7 @@ def build_room_face_topology(model):
                 continue  # room boundary with no physical wall is not a wall atom
             if any(abs(w.thickness - covering[0][0].thickness) > numeric_eps or
                    abs(w.height - covering[0][0].height) > numeric_eps for w, _ in covering):
-                raise ValueError("WALL_ASSEMBLY_CONFLICT")
+                raise EntityConflictError("WALL_ASSEMBLY_CONFLICT")
             owners = {"positive": None, "negative": None}
             for room_id, sign, ra, rb, boundary in rings:
                 if boundary.intersection(atom).length < length - numeric_eps:
@@ -86,7 +87,7 @@ def build_room_face_topology(model):
                 dot = (b[0] - a[0]) * (rb[0] - ra[0]) + (b[1] - a[1]) * (rb[1] - ra[1])
                 side = "positive" if sign * dot > 0 else "negative"
                 if owners[side] not in (None, room_id):
-                    raise ValueError("ROOM_OWNERSHIP_CONFLICT: physical side already owned")
+                    raise EntityConflictError("ROOM_OWNERSHIP_CONFLICT: physical side already owned")
                 owners[side] = room_id
             key = json.dumps([level.id, a, b], separators=(",", ":"))
             atom_id = "edge_" + hashlib.sha256(key.encode()).hexdigest()[:24]

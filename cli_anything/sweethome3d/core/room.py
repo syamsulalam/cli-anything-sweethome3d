@@ -1,3 +1,4 @@
+from cli_anything.sweethome3d.core.exceptions import ValidationRejectedError
 class Room:
     """Represents an enclosed architectural room polygon in Sweet Home 3D."""
 
@@ -90,12 +91,12 @@ class Room:
         rings = [self.points, *(self.holes or [])]
         for index, ring in enumerate(rings):
             if len(ring) < 3 or len(set(map(tuple, ring))) < 3:
-                raise ValueError(f"Room {self.id} ring {index} requires three distinct vertices")
+                raise ValidationRejectedError(f"Room {self.id} ring {index} requires three distinct vertices")
             if not all(math.isfinite(x) and math.isfinite(y) for x, y in ring):
-                raise ValueError(f"Room {self.id} ring {index} has nonfinite coordinates")
+                raise ValidationRejectedError(f"Room {self.id} ring {index} has nonfinite coordinates")
         region = Polygon(self.points, self.holes or [])
         if region.is_empty or not region.is_valid:
-            raise ValueError(f"Invalid room {self.id} polygon: {explain_validity(region)}")
+            raise ValidationRejectedError(f"Invalid room {self.id} polygon: {explain_validity(region)}")
         return region
 
     def get_clear_core_polygon(self, walls=None):

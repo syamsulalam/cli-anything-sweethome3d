@@ -1,8 +1,8 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.22.0 (PAC-1 Contract Iteration 31)  
-**Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)  
-**Status:** In Active Execution  
+**Document Version:** 2.23.0 (PAC-1 Contract Iteration 32)
+**Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)
+**Status:** In Active Execution
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
 
 ---
@@ -450,3 +450,27 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
   - Merged all 19 Round 31 oracles into `tests/test_core.py`, bringing repository test suite to **312 passed in 12.15s** (100% green).
   - All 4 built-in architectural templates validate clean (0 errors, 0 warnings).
   - Clean Open Code Review via `ocr delegate` across 5 production files (0 blockers, 0 warnings, 0 regressions). (`✅ Completed`)
+
+
+### Phase 27: PAC-1 Round 32 Root Closure, Reference Candidate & Protocol Hardening (Iteration 32)
+- [x] **R28-P1-01 (Complete Physical Domain Gate, Canonical Identity & Exact Split Sweeps, Gates T06, A02)**:
+  - In `core/project.py`, `_prepare_wall_edit` validates complete physical field domain: thickness > 0, height > 0, end height > 0, finite length, legal |sweep| < 360, opening height > 0, depth > 0 & finite, explicit pose finite, and non-None resolved geometry.
+  - In both `reverse_wall` and `split_wall`, caller immediately binds canonical `wall_id = wall.id` so opening maps and neighboring joins are consistently updated.
+  - In `split_wall`, preserves exact internal split sweep fractions ($split\_s / total\_len$) without premature decimal rounding, keeping displacement <= 0.01 cm physical budget across large spans. (`✅ Completed`)
+- [x] **R28-P1-02 (Reciprocal Arc Incidence & Analytic Stations, Gates T02, T03, T05)**:
+  - Formally CERTIFIED CLOSED by peer critic (Sol Round 32 review) for selected station and reciprocal incidence invariant across arbitrary insertion orders. (`✅ Completed`)
+- [x] **R28-P1-03 (Singular Sweep Elimination in Native Publication, Gate N03)**:
+  - In `core/native_contract.py`, `compute_curved_wall_error_budget` strictly validates finite source sweep and $0 < |	heta| < 2\pi$, rejecting $360^\circ, -360^\circ, 720^\circ$ sweeps upfront with `ValidationRejectedError` instead of falling back to zero-error success. (`✅ Completed`)
+- [x] **R28-P1-04 (Archive Inventory Invariant Retained, Gate N08)**:
+  - Retained verified complete archive inventory limit checks (<= 10,000 members, <= 100 MiB aggregate size). Formally certified retained closed by peer critic. (`✅ Completed`)
+- [x] **R28-P1-05 (Complete Typed Protocol Migration Across 90 Owner Sites, Gate A04)**:
+  - Migrated 90 explicit owner rejection sites across `invocation.py`, `native_contract.py`, `project.py`, `room.py`, `session.py`, `templates.py`, `topology.py`, and `sweethome3d_cli.py` to typed domain exceptions (`ValidationRejectedError`, `UnsupportedFeatureError`, `EntityConflictError`).
+  - Project JSON decoding catches `JSONDecodeError`/`UnicodeDecodeError` raising typed `ValidationRejectedError`.
+  - Project archive decoding catches `BadZipFile`/`UnicodeDecodeError` raising typed `ValidationRejectedError`.
+  - Native export of unsupported room holes raises `UnsupportedFeatureError` (exit code 5). (`✅ Completed`)
+- [x] **Test Reconciliation & Oracle Integration**:
+  - All 28 Round 32 repair oracles pass 100% green (`2026-10-27_SweetHome3D_CLI_Round32_Repair_Oracles.py`).
+  - All 69 retained oracles (Round 28-31) pass 100% green.
+  - Merged all 28 Round 32 oracles into `tests/test_core.py`, expanding full repository test suite to **340 passed in 14.36s** (100% green).
+  - All 4 built-in architectural templates validate clean (0 errors, 0 warnings).
+  - Clean Open Code Review via `ocr delegate` across modified production files (0 blockers, 0 warnings, 0 regressions). (`✅ Completed`)
