@@ -47,8 +47,14 @@ def test_t01_adjacent_rooms_shared_edge_two_face_ownership():
     # Shared wall
     m.add_wall("w_shared", 300, 0, 300, 300)
 
-    topo = build_room_face_topology(m)
-    assert topo is not None
+    topology = m.build_room_face_topology()
+    assert topology is not None
+    assert len(topology["edges"]) == 7
+    assert sum(e["length_cm"] for e in topology["edges"]) == 2100.0
+    shared = [e for e in topology["edges"] if e["start"] == [300, 0] and e["end"] == [300, 300]]
+    assert len(shared) == 1
+    assert shared[0]["faces"]["positive"]["room_id"] == "rm_1"
+    assert shared[0]["faces"]["negative"]["room_id"] == "rm_2"
 
     # Check area reconciliation
     rm1_poly = m.rooms["rm_1"].get_region_polygon()
@@ -151,6 +157,10 @@ def test_t06_wall_split_reverse_update_delete_consistency():
     assert w_rev.extra_attribs["leftSideColor"] == "0000FF00"
     assert w_rev.extra_attribs["rightSideColor"] == "00FF0000"
 
+    # Add dimension anchor across the wall
+    dim = m.add_dimension("dim_wall", 0.0, 0.0, 400.0, 0.0, offset_cm=30.0)
+    assert "dim_wall" in m.dimensions
+
     # 2. Split wall at 100 cm (outside door which is at 260-350 cm)
     head_wall, tail_wall = m.split_wall("w_sloped", 100.0)
 
@@ -158,9 +168,16 @@ def test_t06_wall_split_reverse_update_delete_consistency():
     assert tail_wall.id == "w_sloped_seg2"
     assert head_wall.length == 100.0
     assert tail_wall.length == 300.0
+    # Sloped wall height interpolation asserted
+    assert head_wall.height == 320.0
+    assert float(head_wall.extra_attribs["heightAtEnd"]) == 300.0
+    assert tail_wall.height == 300.0
+    assert float(tail_wall.extra_attribs["heightAtEnd"]) == 240.0
     # Door was at 260 cm along old wall; on tail wall it must be at 260 - 100 = 160 cm
     assert door.wall_id == tail_wall.id
     assert door.offset_cm == 160.0
+    # Dimension preserved in model
+    assert "dim_wall" in m.dimensions
 
     # 3. Remove tail wall
     ok = m.remove_wall(tail_wall.id)

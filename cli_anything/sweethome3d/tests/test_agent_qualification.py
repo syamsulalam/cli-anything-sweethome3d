@@ -8,6 +8,7 @@ Establishes case-level verification for:
 - A07: Truthful validation coverage and strict rejection enforcement
 """
 import os
+import click
 import json
 import tempfile
 import pytest
@@ -43,9 +44,10 @@ def test_a01_public_capability_manifest_maps_all_stateful_handlers():
 
     # Verify command inventory mapping
     cmds = manifest["commands"]
-    for group in ["project", "wall", "room", "opening", "furniture", "dimension", "level", "export", "session", "system"]:
-        assert group in cmds
-        assert len(cmds[group]) > 0
+    expected = {"": sorted(cli_module.cli.commands),
+                **{name: sorted(child.commands) for name, child in cli_module.cli.commands.items()
+                   if isinstance(child, click.Group)}}
+    assert cmds == expected
 
     # Verify mutation inventory covering all 6 entity owners
     mut = manifest["mutation_inventory"]
@@ -278,6 +280,33 @@ def test_a04_finite_versioned_json_envelopes_across_all_exit_codes():
         d5 = strict_json_loads(r5.output)
         assert d5["protocol_version"] == "1"
         assert d5["error"]["code"] == "UNSUPPORTED"
+
+        # Exit 6: IO_ERROR (attempting to save to existing directory target path)
+        dir_target = os.path.join(tmpdir, "target_is_dir.sh3d")
+        os.mkdir(dir_target)
+        r6 = runner.invoke(cli_module.cli, [
+            "--session", sess_file, "--json", "project", "save",
+            "-o", dir_target
+        ])
+        assert r6.exit_code == 6
+        d6 = strict_json_loads(r6.stdout)
+        assert d6["protocol_version"] == "1"
+        assert d6["error"]["code"] == "IO_ERROR"
+
+        # Exit 7: RECOVERY_REQUIRED (corrupted unresolved recovery journal blocks mutations)
+        pending_journal = sess_file + ".pending"
+        with open(pending_journal, "wb") as f:
+            f.write(b"{corrupted unrecoverable json")
+        r7 = runner.invoke(cli_module.cli, [
+            "--session", sess_file, "--json", "wall", "add",
+            "--id", "w_fail_recovery",
+            "--x1", "0", "--y1", "0",
+            "--x2", "100", "--y2", "0"
+        ])
+        assert r7.exit_code == 7
+        d7 = strict_json_loads(r7.stdout)
+        assert d7["protocol_version"] == "1"
+        assert d7["error"]["code"] == "RECOVERY_REQUIRED"
 
 
 def test_a07_honest_validation_coverage_and_strict_rejection():

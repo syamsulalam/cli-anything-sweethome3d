@@ -1242,24 +1242,19 @@ def capability_cmd(ctx):
             "headless_roundtrip": True
         },
         "commands": {
-            "project": ["new", "open", "save", "info", "validate"],
-            "wall": ["add", "add-loop", "edit", "list", "remove", "reverse", "split"],
-            "room": ["add", "list", "remove"],
-            "opening": ["add", "list", "remove"],
-            "furniture": ["add", "list", "remove", "catalog"],
-            "dimension": ["add", "list", "remove"],
-            "level": ["add", "list", "set-current"],
-            "export": ["json", "svg", "dxf", "html", "sh3d"],
-            "session": ["undo", "redo", "status"],
-            "system": ["capability", "doctor"]
+            "": sorted(cli.commands),
+            **{name: sorted(child.commands) for name, child in cli.commands.items()
+               if isinstance(child, click.Group)},
         },
         "mutation_inventory": {
-            "wall": ["add", "add-loop", "remove", "reverse", "split"],
+            "project": ["new", "open", "save", "template"],
+            "wall": ["add", "add-loop", "remove", "reverse", "split", "node"],
             "room": ["add", "remove"],
             "opening": ["add", "remove"],
             "furniture": ["add", "remove"],
             "dimension": ["add", "remove"],
-            "level": ["add"]
+            "level": ["add", "set-current"],
+            "session": ["undo", "redo"],
         }
     }
     output_result(ctx, manifest, include_project=False)

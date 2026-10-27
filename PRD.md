@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD) — Sweet Home 3D CLI (`cli-anything-sweethome3d`)
 
-**Document Version:** 2.25.0 (PAC-1 Gate-Family Qualification Iteration 35)
+**Document Version:** 2.26.0 (PAC-1 Gate-Family Qualification Iteration 35 — Phase 30)
 **Author / Orchestrator:** Gemini 3.8 Flash (Secretary) & GPT-6.1 Sol (Critic / Boss)
 **Status:** In Active Execution
 **Target:** 10.0 / 10 Production Acceptance (Production Acceptance Contract 1 — PAC-1)
@@ -499,4 +499,18 @@ The target is to satisfy all 58 numbered acceptance gates across 6 vectors defin
 - [x] **Test Suite & Verification Expansion**:
   - Full repository test suite expanded from 348 to **370 passed in 43.15s** (100% green).
   - All 4 built-in architectural templates validate clean (0 errors, 0 warnings).
+  - Clean Open Code Review via `ocr delegate` across all modified production files (0 blockers, 0 warnings, 0 regressions). (`✅ Completed`)
+
+
+### Phase 30: PAC-1 A01 Dynamic Capability Inventory & Enhanced Qualification Assertions (Iteration 35 / Phase 30)
+- [x] **A01 Dynamic Capability Inventory & Semantic Mutators**:
+  - Replaced hardcoded command map with dynamic Click tree reflection (`"": sorted(cli.commands)` and `**{name: sorted(child.commands) for name, child in cli.commands.items() if isinstance(child, click.Group)}}`), eliminating non-existent commands and accurately advertising all registered CLI paths.
+  - Comprehensive semantic `mutation_inventory` across all 8 mutator groups: `project` (`new`, `open`, `save`, `template`), `wall` (`add`, `add-loop`, `remove`, `reverse`, `split`, `node`), `room` (`add`, `remove`), `opening` (`add`, `remove`), `furniture` (`add`, `remove`), `dimension` (`add`, `remove`), `level` (`add`, `set-current`), and `session` (`undo`, `redo`). (`✅ Completed`)
+- [x] **Full Exit Code Spectrum in Finite Versioned JSON Envelopes (A04)**:
+  - Extended `test_agent_qualification.py` to explicitly assert all six standard exit codes: 2 (`INPUT_ERROR`), 3 (`VALIDATION_REJECTED`), 4 (`CONFLICT`), 5 (`UNSUPPORTED`), 6 (`IO_ERROR` on directory target save), and 7 (`RECOVERY_REQUIRED` on corrupted unresolved `.pending` journal). (`✅ Completed`)
+- [x] **Physical Geometry & Sloped Split Height Assertions (T01, T06)**:
+  - Extended `test_architecture_qualification.py` to assert exact physical edge atoms (7 edges, 2100.0 cm total length, shared edge positive 'rm_1' / negative 'rm_2' face ownership), sloped wall height interpolation (`head` 320.0 -> 300.0 cm, `tail` 300.0 -> 240.0 cm), and dimension line anchor preservation. (`✅ Completed`)
+- [x] **Full Repository Suite & Sol Round 35 Qualification Oracles**:
+  - All 5 Round 35 qualification oracles pass 100% green (`2026-10-27_SweetHome3D_CLI_Round35_Qualification_Oracles.py`).
+  - Full repository test suite passes **370 passed in 15.80s** (100% green, 0 failures, 0 skips).
   - Clean Open Code Review via `ocr delegate` across all modified production files (0 blockers, 0 warnings, 0 regressions). (`✅ Completed`)
